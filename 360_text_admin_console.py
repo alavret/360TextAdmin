@@ -1,7 +1,4 @@
-from datetime import date, datetime
-from enum import auto
-from operator import ge
-from unittest import result
+from datetime import datetime
 from dotenv import load_dotenv
 import requests
 import logging
@@ -12,7 +9,6 @@ import sys
 from dataclasses import dataclass
 from http import HTTPStatus
 import time
-from os import environ
 import argparse
 import csv
 import re
