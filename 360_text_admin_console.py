@@ -1411,7 +1411,9 @@ def download_users_attrib_to_file(settings: "SettingParams"):
         return
     else:
         with open('api_users.csv', 'w', encoding='utf-8', newline='') as csv_file:
-            fieldnames = users[0].keys()
+            fieldnames = list(users[0].keys())
+            if "isEnabledUpdatedAt" not in fieldnames:
+                fieldnames.append("isEnabledUpdatedAt")
             writer = csv.DictWriter(csv_file, delimiter=';', fieldnames=fieldnames)
             writer.writeheader()
             for user in users:
