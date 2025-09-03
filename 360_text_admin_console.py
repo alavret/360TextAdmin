@@ -1,4 +1,5 @@
 from datetime import datetime
+from itertools import count
 from dotenv import load_dotenv
 import requests
 import logging
@@ -52,6 +53,11 @@ class SettingParams:
     all_users : list
     all_users_get_timestamp : datetime
     forward_rules_output_file : str
+    shared_mailboxes : list
+    shared_mailboxes_get_timestamp : datetime
+    all_groups : list
+    all_groups_get_timestamp : datetime
+    ignore_user_domain : bool
 
 def get_settings():
     exit_flag = False
@@ -70,7 +76,12 @@ def get_settings():
         skip_scim_api_call = False,
         target_group = {},
         all_users = [],
-        all_users_get_timestamp = datetime.now()
+        all_users_get_timestamp = datetime.now(),
+        shared_mailboxes = [],
+        shared_mailboxes_get_timestamp = datetime.now(),
+        all_groups = [],
+        all_groups_get_timestamp = datetime.now(),
+        ignore_user_domain = False
     )
 
     if not settings.scim_token:
@@ -117,6 +128,9 @@ def get_settings():
 
     if oauth_token_bad:
         exit_flag = True
+
+    if os.environ.get("IgnoreUsernameDomain", "false").lower() == "true":
+        settings.ignore_user_domain = True
     
     if exit_flag:
         return None
@@ -233,7 +247,10 @@ def single_mode(settings: "SettingParams", old_value, new_value):
                                             ]
                                         }""".replace("alias@domain.tld", new_value))
                 
+                logger.debug(f"PATCH URL: {url}/v2/Users/{uid}")
+                logger.debug(f"PATCH DATA: {data}")
                 response = requests.patch(f"{url}/v2/Users/{uid}", headers=headers, json=data)
+                logger.debug(f"X-Request-Id: {response.headers.get("X-Request-Id","")}")
                 if response.status_code != HTTPStatus.OK.value:
                     logger.error(f"Error during PATCH request: {response.status_code}. Error message: {response.text}")
                     if retries < MAX_RETRIES:
@@ -355,11 +372,14 @@ def submenu_1(settings: "SettingParams"):
         print("3. Use users file to change SCIM userName of users.")
         print("4. Enter old and new value of userName manually and confirm renaming.")
         print("5. Change nickname of single user.")
-        print("0. Back to main menu.")
+        print("6. Check alias for user.")
+        print("7. Show user attributes and save their to file.")
+        print("8. Download all users to file (SCIM и API) protocols.")
+        print("0 or empty string. Back to main menu.")
 
         choice = input("Enter your choice (0-5) or Ctrl+C to exit script: ")
 
-        if choice == "0":
+        if choice == "0" or choice == "":
             break
         elif choice == "1":
             print('\n')
@@ -385,6 +405,15 @@ def submenu_1(settings: "SettingParams"):
         elif choice == "5":
             print('\n')
             change_nickname_prompt(settings)
+        elif choice == "6":
+            print('\n')
+            check_alias_prompt(settings)
+        elif choice == "8":
+            print('\n')
+            download_users_attrib_to_file(settings)
+        elif choice == "7":
+            print('\n')
+            show_user_attributes(settings)
         else:
             print("Invalid choice. Please try again.")
     return
@@ -398,11 +427,11 @@ def submenu_2(settings: "SettingParams"):
         print("1. Check alias for user.")
         print("2. Download all users to file (SCIM и API) protocols.")
         print("3. Show user attributes and save their to file.")
-        print("0. Back to main menu.")
+        print("0 or empty string. Back to main menu.")
 
         choice = input("Enter your choice (0-3) or Ctrl+C to exit script: ")
 
-        if choice == "0":
+        if choice == "0" or choice == "":
             break
         elif choice == "1":
             print('\n')
@@ -427,11 +456,11 @@ def submenu_3(settings: "SettingParams"):
         print("1. Show group attributes and save their to file.")
         print("2. Show approve senders for group.")
         print("3. Manage approve senders for group.")
-        print("0. Back to main menu.")
+        print("0 or empty string. Back to main menu.")
 
         choice = input("Enter your choice (0-3) or Ctrl+C to exit script: ")
 
-        if choice == "0":
+        if choice == "0" or choice == "":
             break
         elif choice == "1":
             print('\n')
@@ -458,11 +487,11 @@ def submenu_4(settings: "SettingParams"):
         print("3. Get forward rules for single user.")
         print("4. Download forward rules for all users.")
         print("5. Clear forward rules for users.")
-        print("0. Back to main menu.")
+        print("0 or empty string. Back to main menu.")
 
         choice = input("Enter your choice (0-5) or Ctrl+C to exit script: ")
 
-        if choice == "0":
+        if choice == "0" or choice == "":
             break
         elif choice == "1":
             print('\n')
@@ -499,11 +528,12 @@ def subsubmenu_30(settings: "SettingParams"):
         print("2. Add users to allow list.")
         print("3. Remove users from allow list.")
         print("4. Grand all users send permission.")
-        print("0. Back to main menu.")
+        print("5. Add/Remove shared naiilbax to allow list.")
+        print("0 or empty string. Back to main menu.")
 
         choice = input("Enter your choice (0-4) or Ctrl+C to exit script: ")
 
-        if choice == "0":
+        if choice == "0" or choice == "":
             break
         elif choice == "1":
             print('\n')
@@ -517,6 +547,9 @@ def subsubmenu_30(settings: "SettingParams"):
         elif choice == "4":
             print('\n')
             send_perm_grand_all_users(settings)
+        elif choice == "5":
+            print('\n')
+            send_perm_shared_mailbox(settings)
         else:
             print("Invalid choice. Please try again.")
 
@@ -547,26 +580,91 @@ def get_all_api360_users(settings: "SettingParams", force = False):
             settings.all_users_get_timestamp = datetime.now()
     return settings.all_users
 
+def get_all_shared_mailboxes(settings: "SettingParams", force = False):
+    if not force:
+        logger.info("Getting all shared mailboxes of the organisation from cache...")
+
+    if not settings.shared_mailboxes or force:
+        logger.info("Getting all shared mailboxes of the organisation from API...")
+
+        result, settings.shared_mailboxes = get_shared_mailbox_detail(settings)
+        if not result:
+            logger.info("Can not get shared mailboxes data from Y360 API.")
+        settings.shared_mailboxes_get_timestamp = datetime.now()
+    else:
+        if (datetime.now() - settings.shared_mailboxes_get_timestamp).total_seconds() > ALL_USERS_REFRESH_IN_MINUTES * 60:
+            logger.info("Getting all shared mailboxes of the organisation from API...")
+            result, settings.shared_mailboxes = get_shared_mailbox_detail(settings)
+            if not result:
+                logger.info("Can not get shared mailboxes data from Y360 API.")
+            settings.shared_mailboxes_get_timestamp = datetime.now()
+    return settings.shared_mailboxes
+
+def get_all_groups(settings: "SettingParams", force = False):
+    if not force:
+        logger.info("Getting all groups of the organisation from cache...")
+
+    if not settings.all_groups or force:
+        logger.info("Getting all all groups of the organisation from API...")
+        settings.all_groups = get_all_groups_from_api360(settings)
+        settings.all_groups_get_timestamp = datetime.now()
+    else:
+        if (datetime.now() - settings.all_groups_get_timestamp).total_seconds() > ALL_USERS_REFRESH_IN_MINUTES * 60:
+            logger.info("Getting all all groups of the organisation from API...")
+            settings.all_groups = get_all_groups_from_api360(settings)
+            settings.all_groups_get_timestamp = datetime.now()
+    return settings.all_groups
+
+def http_get_request(url, headers):
+    try:
+        retries = 1
+        while True:
+            logger.debug(f"GET URL - {url}")
+            response = requests.get(url, headers=headers)
+            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            if response.status_code != HTTPStatus.OK.value:
+                print(f"!!! ERROR !!! during GET request url - {url}: {response.status_code}. Error message: {response.text}")
+                if retries < MAX_RETRIES:
+                    print(f"Retrying ({retries+1}/{MAX_RETRIES})")
+                    time.sleep(RETRIES_DELAY_SEC * retries)
+                    retries += 1
+                else:
+                    print(f"!!! Error !!! during GET request url - {url}.")
+                    break
+            else:
+                break
+
+    except requests.exceptions.RequestException as e:
+        print(f"!!! ERROR !!! {type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+
+    return response
+
 def get_all_api360_users_from_api(settings: "SettingParams"):
     logger.info("Getting all users of the organisation...")
     url = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users?perPage=100"
     headers = {"Authorization": f"OAuth {settings.oauth_token}"}
-    try:
-        response = requests.get(url, headers=headers)
-        if response.ok:
-                users = response.json()['users']
-                for i in range(2, response.json()["pages"] + 1):
-                    logger.info(f"Getting users from API, page {i} of {response.json()['pages']} (one page = 100 users)")
-                    response = requests.get(f"{url}&page={i}", headers=headers)
-                    if response.ok:
-                        users.extend(response.json()['users'])
+    has_errors = False
+    response = http_get_request(url, headers=headers)
+    if response.status_code == HTTPStatus.OK.value:
+        users = response.json()['users']
+        for i in range(2, response.json()["pages"] + 1):
+            logger.info(f"Getting users from API, page {i} of {response.json()['pages']} (one page = 100 users)")
+            response = http_get_request(f"{url}&page={i}", headers=headers)
+            if response.status_code == HTTPStatus.OK.value:
+                users.extend(response.json()['users'])
+            else:
+                has_errors = True
+                break
+    else:
+        has_errors = True
 
-    except requests.exceptions.RequestException as e:
-        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+    if has_errors:
+        print("!!! Error !!! during GET request. Return empty list.")
         return []
+    
     return users
 
-def get_all_groups(settings: "SettingParams"):
+def get_all_groups_from_api360(settings: "SettingParams"):
     logger.info("Getting all groups of the organisation...")
     url = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/groups?perPage=100"
     headers = {"Authorization": f"OAuth {settings.oauth_token}"}
@@ -574,7 +672,9 @@ def get_all_groups(settings: "SettingParams"):
     try:
         page = 1
         while True:
+            logger.debug(f"GET url - {url}&page={page}")
             response = requests.get(f"{url}&page={page}", headers=headers)
+            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
             if response.ok:
                 data = response.json()
                 groups.extend(data['groups'])
@@ -629,7 +729,9 @@ def get_default_email(settings: "SettingParams", userId: str):
     try:
         retries = 1
         while True:
+            logger.debug(f"GET url - {url}")
             response = requests.get(url, headers=headers)
+            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
             if response.status_code != HTTPStatus.OK.value:
                 logger.error(f"Error during GET request for user {userId}: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
@@ -663,8 +765,10 @@ def get_all_scim_users(settings: "SettingParams"):
     items = ITEMS_PER_PAGE
     try:
         retries = 1
-        while True:           
+        while True:  
+            logger.debug(f"GET url - {url}")         
             response = requests.get(f"{url}/v2/Users?startIndex={startIndex}&count={items}", headers=headers)
+            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
             if response.status_code != HTTPStatus.OK.value:
                 logger.error(f"Error during GET request: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
@@ -689,6 +793,10 @@ def get_all_scim_users(settings: "SettingParams"):
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
         return []
     
+    if settings.ignore_user_domain:
+        for user in users:
+            user["userName"] = user["userName"].split("@")[0]
+
     return users
 
 def change_nickname_prompt(settings: "SettingParams"):
@@ -739,7 +847,7 @@ def check_alias(settings: "SettingParams", alias: str):
 
 def change_nickname(settings: "SettingParams", old_value: str, new_value: str):
     logger.info(f"Changing nickname of user {old_value} to {new_value}")
-    users = get_all_api360_users(settings)
+    users = get_all_api360_users(settings, True)
     
     if not users:
         logger.error("No users found.")
@@ -766,20 +874,32 @@ def change_nickname(settings: "SettingParams", old_value: str, new_value: str):
                 if contact['type'] == 'email' and contact['value'].split('@')[0] == new_value:
                     logger.error(f"Nickname {new_value} already exists as email contact in user with nickname {user['nickname']}. User ID - {user['id']}. Clear this contact email in this user and try again.")
                     return
+        else:
+            for contact in user['contacts']:
+                if contact['type'] == 'email' and contact['value'].split('@')[0] == new_value:
+                    if settings.skip_scim_api_call:
+                        logger.info(f"Nickname {new_value} already found as alias in target user. Need to delete alias {new_value} in target user (uid - {user['id']}).")
+                        if settings.skip_scim_api_call:
+                            logger.info("SCIM API is disablled. Trying to delete alias using 360 API.")
+                            remove_alias_by_api360(settings, user['id'], new_value)    
     
-    if new_value in target_user[0]['aliases']:
-        remove_alias_in_scim(target_user[0]["id"], new_value)
+    if not settings.skip_scim_api_call:
+        if new_value in target_user[0]['aliases']:
+            remove_alias_in_scim(target_user[0]["id"], new_value)
 
-    for contact in target_user[0]['contacts']:
-        if contact['type'] == 'email' and contact['value'].split('@')[0] == new_value:
-            remove_email_in_scim(target_user[0]["id"], new_value)
+        for contact in target_user[0]['contacts']:
+            if contact['type'] == 'email' and contact['value'].split('@')[0] == new_value:
+                remove_email_in_scim(target_user[0]["id"], new_value)
 
     logger.info(f"Changing nickname of user {old_value} to {new_value}")
     raw_data = {'nickname': new_value}
     url = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users/{target_user[0]['id']}"
     headers = {"Authorization": f"OAuth {settings.oauth_token}"}
+    logger.debug(f"PATCH URL: {url}")
+    logger.debug(f"PATCH DATA: {raw_data}")
     try:
         response = requests.patch(url, headers=headers, data=json.dumps(raw_data))
+        logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
         if response.ok:
             logger.info(f"Nickname of user {old_value} changed to {new_value}")
             time.sleep(SLEEP_TIME_BETWEEN_API_CALLS)
@@ -791,8 +911,39 @@ def change_nickname(settings: "SettingParams", old_value: str, new_value: str):
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
         return 
     
-    remove_alias_in_scim(target_user[0]["id"], old_value)
-    remove_email_in_scim(target_user[0]["id"], old_value)
+    if not settings.skip_scim_api_call:
+        remove_alias_in_scim(target_user[0]["id"], old_value)
+
+    users = get_all_api360_users(settings, True)
+
+
+def remove_alias_by_api360(settings: "SettingParams", user_id: str, alias: str):
+
+    logger.info(f"Removing alias {alias} in _API360_ user {user_id}")
+    try:
+        retries = 1
+        url = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users/{user_id}/aliases/{alias}"
+        headers = {"Authorization": f"OAuth {settings.oauth_token}"}
+        logger.debug(f"DELETE URL: {url}")
+        
+        while True:
+            logger.debug(f"DELETE url - {url}")
+            response = requests.delete(url, headers=headers)
+            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            if response.status_code != HTTPStatus.OK.value:
+                logger.error(f"Error during DELETE request: {response.status_code}. Error message: {response.text}")
+                if retries < MAX_RETRIES:
+                    logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
+                    time.sleep(RETRIES_DELAY_SEC * retries)
+                    retries += 1
+                else:
+                    logger.error(f"Error. Deleting alias {alias} for uid {user_id} failed.")
+                    break
+            else:
+                logger.info(f"Success - Successfully deleting alias {alias} for uid {user_id}.")
+                break
+    except Exception as e:
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
 
 def remove_alias_in_scim(user_id: str, alias: str):
     logger.info(f"Check if exist and removing alias {alias} in _SCIM_ user {user_id}")
@@ -800,7 +951,9 @@ def remove_alias_in_scim(user_id: str, alias: str):
     url = DEFAULT_360_SCIM_API_URL.format(domain_id=settings.domain_id)
     headers = {"Authorization": f"Bearer {settings.scim_token}"}
     try:
+        logger.debug(f"GET url - {url}/v2/Users/{user_id}")
         response = requests.get(f"{url}/v2/Users/{user_id}", headers=headers)
+        logger.debug(f"X-Request-Id: {response.headers.get("X-Request-Id","")}")
         if response.ok:
             user = response.json()
             if user['urn:ietf:params:scim:schemas:extension:yandex360:2.0:User']['aliases']:
@@ -821,8 +974,11 @@ def remove_alias_in_scim(user_id: str, alias: str):
                                                     "urn:ietf:params:scim:api:messages:2.0:PatchOp"
                                                 ]
                                             }""".replace("_data_", json.dumps(user['urn:ietf:params:scim:schemas:extension:yandex360:2.0:User']['aliases'])))
-
+                    
+                    logger.debug(f"PATCH URL: {url}/v2/Users/{user_id}")
+                    logger.debug(f"PATCH DATA: {data}")
                     response = requests.patch(f"{url}/v2/Users/{user_id}", headers=headers, data=json.dumps(data))
+                    logger.debug(f"X-Request-Id: {response.headers.get("X-Request-Id","")}")
                     if response.ok:
                         logger.info(f"Alias {alias} removed in user {user_id}")
                         time.sleep(SLEEP_TIME_BETWEEN_API_CALLS)
@@ -836,7 +992,9 @@ def remove_email_in_scim(user_id: str, alias: str):
     url = DEFAULT_360_SCIM_API_URL.format(domain_id=settings.domain_id) 
     headers = {"Authorization": f"Bearer {settings.scim_token}"}
     try:
+        logger.debug(f"GET url - {url}/v2/Users/{user_id}")
         response = requests.get(f"{url}/v2/Users/{user_id}", headers=headers)
+        logger.debug(f"X-Request-Id: {response.headers.get("X-Request-Id","")}")
         if response.ok:
             user = response.json()
             new_emails= []
@@ -865,8 +1023,11 @@ def remove_email_in_scim(user_id: str, alias: str):
                                                 "urn:ietf:params:scim:api:messages:2.0:PatchOp"
                                             ]
                                         }""".replace("_data_", json.dumps(new_emails)))
-
+                
+                logger.debug(f"PATCH URL: {url}/v2/Users/{user_id}")
+                logger.debug(f"PATCH DATA: {data}") 
                 response = requests.patch(f"{url}/v2/Users/{user_id}", headers=headers, data=json.dumps(data))
+                logger.debug(f"X-Request-Id: {response.headers.get("X-Request-Id","")}")
                 if response.ok:
                     logger.info(f"Alias {alias} removed from email contacts in _SCIM_ user {user_id}")
                     time.sleep(SLEEP_TIME_BETWEEN_API_CALLS)
@@ -962,7 +1123,10 @@ def update_users_from_SCIM_userName_file(settings: "SettingParams"):
                                             ]
                                         }""".replace("alias@domain.tld", new_userName))
                 
+                logger.debug(f"PATCH URL: {url}/v2/Users/{uid}")
+                logger.debug(f"PATCH DATA: {data}")
                 response = requests.patch(f"{url}/v2/Users/{uid}", headers=headers, json=data)
+                logger.debug(f"X-Request-Id: {response.headers.get("X-Request-Id","")}")
                 if response.status_code != HTTPStatus.OK.value:
                     logger.error(f"Error during PATCH request: {response.status_code}. Error message: {response.text}")
                     if retries < MAX_RETRIES:
@@ -982,7 +1146,7 @@ def update_users_from_SCIM_userName_file(settings: "SettingParams"):
 
 def show_user_attributes(settings: "SettingParams"):
     while True:
-        answer = input("Enter target user key in format: id:<UID> or userName:<SCIM_USER_NAME> or <API_360_NICKNAME> or <API_360_ALIAS> (empty string to exit): ")
+        answer = input("Enter target user in format: id:<UID> or userName:<SCIM_USER_NAME> or <API_360_NICKNAME> or <API_360_ALIAS> or lastNamme (empty string to exit): ")
         if not answer.strip():
             break
         if ":" in answer:
@@ -1047,17 +1211,20 @@ def show_user_attributes(settings: "SettingParams"):
         logger.info("--------------------------------------------------------")
         for k, v in target_user.items():
             if k.lower() == "contacts":
-                logger.info("Contacts")
+                logger.info("Contacts:")
                 for l in v: 
                     for k1, v1 in l.items():  
                         logger.info(f" - {k1}: {v1}")
                     logger.info(" -")
             elif k.lower() == "aliases":
-                logger.info("Aliases")
-                for l in v:
-                    logger.info(f" - {l}")
+                if not v:
+                    logger.info("Aliases: []")
+                else:
+                    logger.info("Aliases:")
+                    for l in v:
+                        logger.info(f" - {l}")
             elif k.lower() == "name":
-                logger.info("Name")
+                logger.info("Name:")
                 for k1, v1 in v.items():  
                     logger.info(f" - {k1}: {v1}")
             else:
@@ -1069,34 +1236,37 @@ def show_user_attributes(settings: "SettingParams"):
             logger.info("--------------------------------------------------------")
             for k, v in target_scim_user.items():
                 if k.lower() == "emails":
-                    logger.info("Emails")
+                    logger.info("Emails:")
                     for l in v:
                         for k1, v1 in l.items():   
                             logger.info(f" - {k1}: {v1}")
                         logger.info(" -")
                 elif k.lower() == "metadata":
-                    logger.info("Metadata")
+                    logger.info("Metadata:")
                     for k1, v1 in v.items():  
                         logger.info(f" - {k1}: {v1}")
                 elif k.lower() == "name":
-                    logger.info("name")
+                    logger.info("name:")
                     for k1, v1 in v.items():  
                         logger.info(f" - {k1}: {v1}")
                 elif k.lower() == "meta":
-                    logger.info("meta")
+                    logger.info("meta:")
                     for k1, v1 in v.items():  
                         logger.info(f" - {k1}: {v1}")
                 elif k.lower() == "phonenumbers":
-                    logger.info("phoneNumbers")
+                    logger.info("phoneNumbers:")
                     for l in v:
                         for k1, v1 in l.items():  
                             logger.info(f" - {k1}: {v1}")
                         logger.info(" -")
                 elif k == "urn:ietf:params:scim:schemas:extension:yandex360:2.0:User":
-                    logger.info("aliases")
-                    for l in v["aliases"]:
-                        for k1, v1 in l.items():
-                            logger.info(f" - {k1}: {v1}")
+                    if not v["aliases"]:
+                        logger.info("aliases: []")
+                    else:
+                        logger.info("aliases:")
+                        for l in v["aliases"]:
+                            for k1, v1 in l.items():
+                                logger.info(f" - {k1}: {v1}")
                 else:
                     logger.info(f"{k}: {v}")
             logger.info("--------------------------------------------------------")
@@ -1107,17 +1277,20 @@ def show_user_attributes(settings: "SettingParams"):
             f.write("--------------------------------------------------------\n")
             for k, v in target_user.items():
                 if k.lower() == "contacts":
-                    f.write("Contacts\n")
+                    f.write("Contacts:\n")
                     for l in v: 
                         for k1, v1 in l.items():  
                             f.write(f" - {k1}: {v1}\n")
                         f.write(" -\n")
                 elif k.lower() == "aliases":
-                    f.write("Aliases\n")
-                    for l in v:
-                        f.write(f" - {l}\n")
+                    if not v:
+                        f.write("Aliases: []\n")
+                    else:
+                        f.write("Aliases:\n")
+                        for l in v:
+                            f.write(f" - {l}\n")
                 elif k.lower() == "name":
-                    f.write("Name\n")
+                    f.write("Name:\n")
                     for k1, v1 in v.items():  
                         f.write(f" - {k1}: {v1}\n")
                 else:
@@ -1129,34 +1302,37 @@ def show_user_attributes(settings: "SettingParams"):
                 f.write("--------------------------------------------------------\n")
                 for k, v in target_scim_user.items():
                     if k.lower() == "emails":
-                        f.write("Emails\n")
+                        f.write("Emails:\n")
                         for l in v:
                             for k1, v1 in l.items():   
                                 f.write(f" - {k1}: {v1}\n")
                             f.write(" -\n")
                     elif k.lower() == "metadata":
-                        f.write("Metadata\n")
+                        f.write("Metadata:\n")
                         for k1, v1 in v.items():  
                             f.write(f" - {k1}: {v1}\n")
                     elif k.lower() == "name":
-                        f.write("name\n")
+                        f.write("name:\n")
                         for k1, v1 in v.items():  
                             f.write(f" - {k1}: {v1}\n")
                     elif k.lower() == "meta":
-                        f.write("meta\n")
+                        f.write("meta:\n")
                         for k1, v1 in v.items():  
                             f.write(f" - {k1}: {v1}\n")
                     elif k.lower() == "phonenumbers":
-                        f.write("phoneNumbers\n")
+                        f.write("phoneNumbers:\n")
                         for l in v:
                             for k1, v1 in l.items():  
                                 f.write(f" - {k1}: {v1}\n")
                             f.write(" -\n")
                     elif k == "urn:ietf:params:scim:schemas:extension:yandex360:2.0:User":
-                        f.write("aliases")
-                        for l in v["aliases"]:
-                            for k1, v1 in l.items():
-                                f.write(f" - {k1}: {v1}\n")
+                        if not v["aliases"]: 
+                            f.write("aliases: []\n")
+                        else:
+                            f.write("aliases:\n")
+                            for l in v["aliases"]:
+                                for k1, v1 in l.items():
+                                    f.write(f" - {k1}: {v1}\n")
                     else:
                         f.write(f"{k}: {v}\n")
                 f.write("--------------------------------------------------------\n")
@@ -1301,6 +1477,7 @@ def save_group_data_prompt(settings: "SettingParams"):
 def show_mailing_list_permissions(settings: "SettingParams", input_group = {}):
     users = []
     user_id_to_nickname = {}
+    user_id_to_name = {}
     while True:
         if not input_group:
             answer = input("Enter group alias, id or uid to get mailing list permissions (empty string to exit): ")
@@ -1319,12 +1496,33 @@ def show_mailing_list_permissions(settings: "SettingParams", input_group = {}):
         if not user_id_to_nickname:
             for user in users:
                 user_id_to_nickname[user['id']] = user.get('nickname', 'Unknown')
+                name = user.get('name', {})
+                user_id_to_name[user['id']] = f"{name.get('last', '')} {name.get('first', '')} {name.get('middle', '')}" 
+
+
         
         # Get mailing list permissions
         permissions = get_mailing_list_permissions(settings, target_group['emailId'])
         if permissions is None:
             logger.error(f"Failed to get mailing list permissions for group {target_group['name']}")
             continue
+
+        shared_mailboxes = []
+        need_load_shared_mailboxes = False
+        if 'grants' in permissions and 'items' in permissions['grants']:
+            for item in permissions['grants']['items']:
+                if 'subject' in item:
+                    subject = item['subject']
+                    subject_type = subject.get('type', 'unknown')
+                    if subject_type == 'shared_mailbox':
+                        need_load_shared_mailboxes = True
+                        break
+        if need_load_shared_mailboxes:
+            shared_mailboxes = get_all_shared_mailboxes(settings)   
+
+        shared_mailboxes_dict = {}
+        for shared_mailbox in shared_mailboxes:
+            shared_mailboxes_dict[shared_mailbox['id']] = shared_mailbox           
         
         # Display results in the specified format
         group_name = target_group.get('name', 'Unknown')
@@ -1354,11 +1552,15 @@ def show_mailing_list_permissions(settings: "SettingParams", input_group = {}):
                         subject_org = subject.get('org_id', 'unknown')
                         if str(subject_org) == str(settings.org_id):
                             nickname = user_id_to_nickname.get(str(subject_id), 'Unknown')
-                            logger.info(f" - type: {subject_type}, id: {subject_id} (nickname: {nickname})")
+                            logger.info(f" - type: {subject_type}, id: {subject_id}, org_id: {subject.get('org_id', '')}, nickname: {nickname}, name: {user_id_to_name.get(str(subject_id), '')}")
                     elif subject_type == 'anonymous':
                         logger.info(f" - type: {subject_type}")
                     elif subject_type == 'organization':
                         logger.info(f" - type: {subject_type}, org_id: {subject.get('org_id', '')}")
+                    elif subject_type == 'shared_mailbox':
+                        name = shared_mailboxes_dict.get(str(subject_id), {}).get('name', 'Unknown')
+                        email = shared_mailboxes_dict.get(str(subject_id), {}).get('email', 'Unknown')
+                        logger.info(f" - type: {subject_type}, id: {subject_id}, org_id: {subject.get('org_id', '')}, name: {name}, email: {email}")
                     else:
                         logger.info(f" - type: {subject_type}, org_id: {subject.get('org_id', '')}, id: {subject.get('id', '')}")
         if count_senders == 0:
@@ -1383,7 +1585,9 @@ def get_mailing_list_permissions(settings: "SettingParams", group_id: str):
     try:
         retries = 1
         while True:
+            logger.debug(f"GET url - {url}")
             response = requests.get(url, headers=headers)
+            logger.debug(f"Yandex-Cloud-Request-ID: {response.headers["Yandex-Cloud-Request-ID"]}")
             if response.status_code != HTTPStatus.OK.value:
                 logger.error(f"Error during GET request for group {group_id}: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
@@ -1397,7 +1601,7 @@ def get_mailing_list_permissions(settings: "SettingParams", group_id: str):
                 data = response.json()
                 logger.debug(f"Successfully retrieved mailing list permissions for group {group_id}")
                 logger.debug(f"url - GET {url}")
-                logger.debug(f"Raw JSON -  {json.dumps(data)}")
+                logger.debug(f"Raw JSON -  {data}")
                 return data
     except requests.exceptions.RequestException as e:
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
@@ -1438,17 +1642,25 @@ def default_email_create_file(settings: "SettingParams"):
         return
     else:
         email_dict = {}
+        nickname_dict = {}
+        logger.info(f"Downloading default emails for {len(users)} users...")
+        count = 0
+        total = len(users)
         for user in users:
             if user["id"].startswith("113"):
                 default_email_json = get_default_email(settings, user["id"])
+                count += 1
+                if divmod(count, 50)[1] == 0:
+                    logger.info(f"Got default email for {count} of {total} users.")
                 email_dict[user["id"]] = default_email_json
+                nickname_dict[user["id"]] = user["nickname"]
 
         with open(settings.default_email_output_file, "w", encoding="utf-8") as f:
             f.write("nickname;new_DefaultEmail;new_DisplayName;old_DefaultEmail;old_DisplayName;uid\n")
             for key in email_dict.keys():
                 email_data = email_dict[key]
                 if email_data:
-                    f.write(f"{user['nickname']};{email_data['defaultFrom']};{email_data['fromName']};{email_data['defaultFrom']};{email_data['fromName']};{user['id']}\n")
+                    f.write(f"{nickname_dict[key]};{email_data['defaultFrom']};{email_data['fromName']};{email_data['defaultFrom']};{email_data['fromName']};{key}\n")
             logger.info(f"Default emails downloaded to {settings.default_email_output_file} file.")
 
 def default_email_update_from_file(settings: "SettingParams"):
@@ -1613,9 +1825,12 @@ def default_email_update_from_file(settings: "SettingParams"):
                     data["fromName"] = user["new_DisplayName"].strip()
                 if change_mail:
                     data["defaultFrom"] = user["new_DefaultEmail"].strip()
+                logger.debug(f"POST URL: {url}/{uid}/settings/sender_info")
+                logger.debug(f"POST DATA: {data}")
                 response = requests.post(f"{url}/{uid}/settings/sender_info", headers=headers, json=data)
+                logger.debug(f"x-request-id: {response.headers.get("X-Request-Id","")}")
                 if response.status_code != HTTPStatus.OK.value:
-                    logger.error(f"Error during PATCH request: {response.status_code}. Error message: {response.text}")
+                    logger.error(f"Error during POST request: {response.status_code}. Error message: {response.text}")
                     if retries < MAX_RETRIES:
                         logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
                         time.sleep(RETRIES_DELAY_SEC * retries)
@@ -1631,7 +1846,6 @@ def default_email_update_from_file(settings: "SettingParams"):
 
 def send_perm_set_target_group(settings: "SettingParams"):
     while True:
-        print("\n")
         answer = input("Enter group alias, id or uid to get mailing list permissions (empty string to exit): ")
         if not answer.strip():
             break
@@ -1662,7 +1876,7 @@ def send_perm_add_users_to_allow_list_prompt(settings: "SettingParams"):
             logger.info("No users to add. Exiting.")
             continue
 
-        if send_perm_call_api(settings, users_to_add, "ADD_USER"):
+        if send_perm_call_api(settings, users_to_add, "ADD_USER", []):
             show_mailing_list_permissions(settings, settings.target_group)
             break
 
@@ -1679,7 +1893,7 @@ def send_perm_remove_users_from_allow_list(settings: "SettingParams"):
             logger.info("No users to remove. Exiting.")
             continue
 
-        if send_perm_call_api(settings, users_to_remove, "REMOVE_USER"):
+        if send_perm_call_api(settings, users_to_remove, "REMOVE_USER", []):
             show_mailing_list_permissions(settings, settings.target_group)
             break
         
@@ -1697,13 +1911,132 @@ def send_perm_grand_all_users(settings: "SettingParams"):
         answer = input("Need confirmation for setting grand all permission (yes/no): ").strip().lower()
 
     if answer == "yes":
-        if send_perm_call_api(settings, None, "SET_DEFAULT"):
+        if send_perm_call_api(settings, None, "SET_DEFAULT", []):
             show_mailing_list_permissions(settings, settings.target_group)
     else:
         logger.info("Execution canceled.")
 
     return
-def send_perm_call_api(settings: "SettingParams", users_to_change, mode):
+
+def get_shared_mailbox_detail(settings: "SettingParams"):
+     
+    shared_mailboxes = []    
+    result, shared_from_api = get_shared_mailboxes_from_api(settings)
+    if not result:
+        logger.error("Can not get shared mailboxes from API.")
+        return False, []
+    if not shared_from_api:
+        logger.info("List of shared mailboxes, received from API is empty. Exiting.")
+        return True, []
+    count = 0
+    logger.info(f"Get detail information for {len(shared_from_api)} shared mailboxex.")
+    for api_shared_mailbox in shared_from_api:
+        temp = get_shared_mailbox_details_from_api(settings, api_shared_mailbox["resourceId"])
+        count += 1
+        if divmod(count, 10)[1] == 0:
+            logger.info(f"Got info for {count} shared mailboxes. Total count - {len(shared_from_api)}")
+        if temp:
+            shared_mailboxes.append(temp)
+    if not shared_mailboxes:
+        logger.error("Can not get shared mailboxes details from API. Exiting.")
+        return False, []
+    
+    return True, shared_mailboxes
+
+def send_perm_shared_mailbox(settings: "SettingParams"):
+
+    if not settings.target_group:
+        logger.info("No target group set. Exiting.")
+        return
+    
+    shared_mailboxes = get_all_shared_mailboxes(settings)
+    if not shared_mailboxes:
+        logger.info("List of shared mailboxes is empty.")
+        return
+    
+    while True:
+
+        show_mailing_list_permissions(settings, settings.target_group)
+        logger.info("To add shared mailbox to list, type +email_of_shared_mailbox, to remove from list, type -email_of_shared_mailbox.")
+        answer = input("Enter shared mailboxes emails, aliases or part of name (with + or -), separated by comma or space (empty string to exit): ")
+        if not answer.strip():
+            break
+
+        pattern = r'[;,\s]+'
+        shared_mailboxes_for_search = re.split(pattern, answer)
+        data_to_add = []
+        for search_mailbox in shared_mailboxes_for_search:
+            if search_mailbox.startswith("+"):
+                op = "ADD_SHARED_MAILBOX"
+                temp = search_mailbox[1:]
+            elif search_mailbox.startswith("-"):
+                op = "REMOVE_SHARED_MAILBOX"
+                temp = search_mailbox[1:]
+            else:
+                op = "ADD_SHARED_MAILBOX"
+                temp = search_mailbox
+
+            found_mailbox = False
+            if "@" in temp:
+                for shared_mailbox in shared_mailboxes:
+                    if shared_mailbox["email"] == temp:
+                        found_mailbox = True
+                        logger.info(f"Shared mailbox with name {temp} found:")
+                        logger.info(f" - name{shared_mailbox['name']}, email {shared_mailbox['email']}, description {shared_mailbox['description']}")
+                        logger.info("Adding to list of permissions.")
+                        data_to_add.append({"op":op,"mailbox":shared_mailbox})
+                        break
+                if not found_mailbox:
+                    logger.error(f"Shared mailbox {temp} not found. Skip adding to list of permissions.")
+                    continue
+            else:
+                found_in_name_count = 0
+                found_in_name_list = []
+                for shared_mailbox in shared_mailboxes:
+                    if temp.lower() == shared_mailbox["email"].lower().split("@")[0]:
+                        found_mailbox = True
+                        data_to_add.append({"op":op,"mailbox":shared_mailbox})
+                        break
+                if not found_mailbox:
+                    for shared_mailbox in shared_mailboxes:
+                        if temp.lower() in shared_mailbox["name"].lower():
+                            found_in_name_count += 1
+                            found_in_name_list.append(shared_mailbox)
+                    if found_in_name_count > 1:
+                        logger.error(f"Found more than one shared mailbox with name {temp}:")
+                        for info in found_in_name_list:
+                            logger.error(f" - name {info['name']}, email {info['email']}, description {info['description']}")
+                        logger.error("Skip adding to list of permissions shared mailbox with name {temp}.")
+                        continue
+                    elif found_in_name_count == 1:
+                        data_to_add.append({"op":op,"mailbox":found_in_name_list[0]})
+                        logger.info(f"Shared mailbox with name {temp} found:")
+                        logger.info(f" - name{found_in_name_list[0]['name']}, email {found_in_name_list[0]['email']}, description {found_in_name_list[0]['description']}")
+                        logger.info("Adding to list of permissions.")
+                        continue
+                    else:
+                        logger.error(f"Shared mailbox with name {temp} not found. Skip adding to list of permissions.")
+                        continue
+
+        if not data_to_add:
+            logger.error("No shared mailboxes to change in send permissions. Exiting.")
+            continue
+
+        added_list = [v["mailbox"] for v in data_to_add if v["op"] == "ADD_SHARED_MAILBOX"]
+        removed_list = [v["mailbox"] for v in data_to_add if v["op"] == "REMOVE_SHARED_MAILBOX"]
+
+        if added_list:
+            send_perm_call_api(settings, None, "ADD_SHARED_MAILBOX", added_list)
+
+        if removed_list:
+            send_perm_call_api(settings, None, "REMOVE_SHARED_MAILBOX", removed_list)
+
+        # show_mailing_list_permissions(settings, settings.target_group)
+    
+    return
+
+
+def send_perm_call_api(settings: "SettingParams", users_to_change, mode, shared_mailboxes):
     url = f"{DEFAULT_360_API_URL_V2}/{settings.org_id}/mail-lists/{settings.target_group['emailId']}/update-permissions"
     headers = {
         "Authorization": f"OAuth {settings.oauth_token}",
@@ -1789,20 +2122,50 @@ def send_perm_call_api(settings: "SettingParams", users_to_change, mode):
                 "subjects": subjects
             })
 
+    elif mode == "ADD_SHARED_MAILBOX":
+
+        subjects = []
+        for mailbox in shared_mailboxes:
+            subjects.append({  
+                "type": "shared_mailbox",  
+                "id": int(mailbox["id"]),  
+                "org_id": int(settings.org_id)  
+                })
+
+        data["role_actions"].append({  
+            "type": "grant",  
+            "roles": ["mail_list_sender"],  
+            "subjects": subjects  
+        })
+
+    elif mode == "REMOVE_SHARED_MAILBOX":
+        subjects = []
+        for item in permissions['grants']['items']:
+            if 'subject' in item:
+                if item['subject']['type'] == 'shared_mailbox':
+                    if str(item['subject']['id']) in [mailbox['id'] for mailbox in shared_mailboxes]:
+                        subjects.append(item['subject'])
+
+        if subjects:
+            data["role_actions"].append({
+                "type": "revoke",  
+                "roles": ["mail_list_sender"],  
+                "subjects": subjects
+            })
+
     if not data["role_actions"]:
-        logger.error("No users to modify for send permissions for group {settings.target_group['name']}. Exiting.")
+        logger.error("No subjects to modify for send permissions for group {settings.target_group['name']}. Exiting.")
         return return_value
     elif not data["role_actions"][0]["subjects"]:
-        logger.error("No users to modify for send permissions for group {settings.target_group['name']}. Exiting.")
+        logger.error("No subjects to modify for send permissions for group {settings.target_group['name']}. Exiting.")
         return return_value
-
-    logger.debug(f"Raw url: {url}")
-    logger.debug(f"Raw JSON: {json.dumps(data)})")
     try:
         retries = 1
-
         while True:
+            logger.debug(f"POST url: {url}")
+            logger.debug(f"Raw POST JSON: {json.dumps(data)})")
             response = requests.post(url, headers=headers, json=data)
+            logger.debug(f"Yandex-Cloud-Request-ID: {response.headers["Yandex-Cloud-Request-ID"]}")
             if not (response.status_code == 200 or response.status_code == 204):
                 logger.error(f"Error during POST request: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
@@ -1820,6 +2183,81 @@ def send_perm_call_api(settings: "SettingParams", users_to_change, mode):
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
 
     return return_value
+
+def get_shared_mailboxes_from_api(settings: "SettingParams"):
+    logger.info("Get shared mailboxes from API.")
+    url = f"{DEFAULT_360_API_URL}/admin/v1/org/{settings.org_id}/mailboxes/shared" 
+    headers = {
+        "Authorization": f"OAuth {settings.oauth_token}",
+    }
+    shared_list = []
+    params = {}
+    
+    try:
+        params["perPage"] = 100
+        params["page"] = 1
+        retries = 0
+        while True: 
+            logger.debug(f"GET url: {url}")
+            logger.debug(f"GET Params: {params}")
+            response = requests.get(url, headers=headers, params=params)
+            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            if response.status_code != HTTPStatus.OK.value:
+                logger.error(f"Error during GET request: {response.status_code}. Error message: {response.text}")
+                if retries < MAX_RETRIES:
+                    logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
+                    time.sleep(RETRIES_DELAY_SEC * retries)
+                    retries += 1
+                else:
+                    logger.error(f"Forcing exit without getting data.")
+                    return False, []
+            else:
+                retries = 1
+                temp_list = response.json()["resources"]
+                if temp_list:
+                    logger.info(f'Got page {params['page']} of {divmod(int(response.json()["total"]), params["perPage"])[0] +1} pages ({params["perPage"]} records per page).')
+                    shared_list.extend(temp_list)
+                    
+                    if  params["page"] < divmod(int(response.json()["total"]), params["perPage"])[0] + 1 :
+                        params["page"] += 1
+                    else:
+                        break
+
+    except Exception as e:
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+        return False, []
+
+    return True, shared_list
+
+def get_shared_mailbox_details_from_api(settings: "SettingParams", shared_mailbox_id: str):
+    logger.debug(f"Get shared mailbox details from API (id - {shared_mailbox_id}).")
+    url = f"{DEFAULT_360_API_URL}/admin/v1/org/{settings.org_id}/mailboxes/shared/{shared_mailbox_id}"
+    headers = {
+        "Authorization": f"OAuth {settings.oauth_token}",
+    }
+    try:
+        retries = 0
+        while True: 
+            logger.debug(f"GET url: {url}")
+            response = requests.get(url, headers=headers)
+            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            if response.status_code != HTTPStatus.OK.value:
+                logger.debug(f"Error during GET request: {response.status_code}. Error message: {response.text}")
+                if retries < MAX_RETRIES:
+                    logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
+                    time.sleep(RETRIES_DELAY_SEC * retries)
+                    retries += 1
+                else:
+                    logger.error(f"Forcing exit without getting data.")
+                    return
+            else:
+                break
+
+    except Exception as e:
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+        return
+    
+    return response.json()
 
 def forward_rules_get_for_user(settings: "SettingParams"):
     logger.info("Get forward rules for users.")
@@ -1956,7 +2394,9 @@ def get_forward_rules_from_api(settings: "SettingParams", user):
     try:
         retries = 1
         while True:
+            logger.debug(f"GET url - {url}")
             response = requests.get(url, headers=headers)
+            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
             if response.status_code != HTTPStatus.OK.value:
                 logger.error(f"Error during GET request for user {user["id"]}: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
@@ -2003,12 +2443,13 @@ def clear_forward_rule_by_api(settings: "SettingParams", user, ruleId):
     url = f"{DEFAULT_360_API_URL}/admin/v1/org/{settings.org_id}/mail/users/{user["id"]}/settings/user_rules/{ruleId}"
     headers = {"Authorization": f"OAuth {settings.oauth_token}"}
     logger.info(f"Clearing forward rule {ruleId} for user {user["id"]} ({user["nickname"]})...")
-    logger.debug(f"URL: {url}")
 
     try:
         retries = 1
         while True:
+            logger.debug(f"DELETE URL: {url}")
             response = requests.delete(url, headers=headers)
+            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
             if response.status_code != HTTPStatus.OK.value:
                 logger.error(f"Error during DELETE request for user {user["id"]}: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
@@ -2074,6 +2515,8 @@ if __name__ == "__main__":
     if os.path.exists(denv_path):
         load_dotenv(dotenv_path=denv_path,verbose=True, override=True)
 
+    logger.debug("\n")
+    logger.debug("---------------------------------------------------------------------------.")
     logger.debug("Запуск скрипта.")
 
     settings = get_settings()
@@ -2081,6 +2524,11 @@ if __name__ == "__main__":
         logger.error("Check config setting in .env file and try again.")
         sys.exit(EXIT_CODE)
 
+    logger.debug("Параметры ENV:")
+    logger.debug(f"ORG_ID_ARG: {settings.org_id}")
+    logger.debug(f"SCIM_DOMAIN_ID_ARG: {settings.domain_id}")
+    logger.debug(f"IgnoreUsernameDomain: {settings.ignore_user_domain}")
+    
     try:
         main(settings)
 
