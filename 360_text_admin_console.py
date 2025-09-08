@@ -1,5 +1,4 @@
 from datetime import datetime
-from itertools import count
 from dotenv import load_dotenv
 import requests
 import logging
@@ -356,8 +355,6 @@ def main_menu(settings: "SettingParams"):
         else:
             print("Invalid choice. Please try again.")
 
-
-
 def submenu_1(settings: "SettingParams"):
     while True:
         print("\n")
@@ -528,7 +525,7 @@ def subsubmenu_30(settings: "SettingParams"):
         print("2. Add users to allow list.")
         print("3. Remove users from allow list.")
         print("4. Grand all users send permission.")
-        print("5. Add/Remove shared naiilbax to allow list.")
+        print("5. Add/Remove shared mailbox to allow list.")
         print("0 or empty string. Back to main menu.")
 
         choice = input("Enter your choice (0-4) or Ctrl+C to exit script: ")
@@ -569,15 +566,10 @@ def get_all_api360_users(settings: "SettingParams", force = False):
     if not force:
         logger.info("Getting all users of the organisation from cache...")
 
-    if not settings.all_users or force:
+    if not settings.all_users or force or (datetime.now() - settings.all_users_get_timestamp).total_seconds() > ALL_USERS_REFRESH_IN_MINUTES * 60:
         logger.info("Getting all users of the organisation from API...")
         settings.all_users = get_all_api360_users_from_api(settings)
         settings.all_users_get_timestamp = datetime.now()
-    else:
-        if (datetime.now() - settings.all_users_get_timestamp).total_seconds() > ALL_USERS_REFRESH_IN_MINUTES * 60:
-            logger.info("Getting all users of the organisation from API...")
-            settings.all_users = get_all_api360_users_from_api(settings)
-            settings.all_users_get_timestamp = datetime.now()
     return settings.all_users
 
 def get_all_shared_mailboxes(settings: "SettingParams", force = False):
@@ -800,6 +792,20 @@ def get_all_scim_users(settings: "SettingParams"):
     return users
 
 def change_nickname_prompt(settings: "SettingParams"):
+    """
+    Interactive prompt for changing user nicknames.
+    
+    Continuously prompts the user to enter old and new nickname values separated by space.
+    Validates input to ensure exactly two space-separated values are provided.
+    Calls change_nickname function with the provided values.
+    Exits when user enters an empty string.
+    
+    Args:
+        settings (SettingParams): Configuration settings containing API tokens and organization details.
+        
+    Returns:
+        None
+    """
     while True:
         data = input("Enter old value and new value of nickname separated by space (empty sting to exit): ")
         if len(data.strip()) == 0:
@@ -854,29 +860,32 @@ def change_nickname(settings: "SettingParams", old_value: str, new_value: str):
         return
     logger.info(f"{len(users)} users found.")
 
-    target_user = [user for user in users if user['nickname'] == old_value]
+    new_value = new_value.lower()
+    old_value = old_value.lower()
+
+    target_user = [user for user in users if user['nickname'].lower() == old_value]
     if not target_user:
         logger.error(f"User with nickname {old_value} not found.")
         return
     logger.info(f"User with nickname {old_value} found. User ID - {target_user[0]['id']}")
 
-    existing_user = [user for user in users if user['nickname'] == new_value]
+    existing_user = [user for user in users if user['nickname'].lower() == new_value]
     if existing_user:
         logger.error(f"User with nickname {new_value} already exists. User ID - {existing_user[0]['id']}. Clear this nickname and try again.")
         return
     
     for user in users:
-        if new_value in user['aliases'] and user['nickname'] != old_value:
+        if new_value in [r.lower() for r in user['aliases']] and user['nickname'].lower() != old_value:
             logger.error(f"Nickname {new_value} already exists as alias in user with nickname {user['nickname']}. User ID - {user['id']}. Clear this alias in this user and try again.")
             return
-        if user['nickname'] != old_value:
+        if user['nickname'].lower() != old_value:
             for contact in user['contacts']:
-                if contact['type'] == 'email' and contact['value'].split('@')[0] == new_value:
+                if contact['type'] == 'email' and contact['value'].split('@')[0].lower() == new_value:
                     logger.error(f"Nickname {new_value} already exists as email contact in user with nickname {user['nickname']}. User ID - {user['id']}. Clear this contact email in this user and try again.")
                     return
         else:
             for contact in user['contacts']:
-                if contact['type'] == 'email' and contact['value'].split('@')[0] == new_value:
+                if contact['type'] == 'email' and contact['value'].split('@')[0].lower() == new_value:
                     if settings.skip_scim_api_call:
                         logger.info(f"Nickname {new_value} already found as alias in target user. Need to delete alias {new_value} in target user (uid - {user['id']}).")
                         if settings.skip_scim_api_call:
@@ -884,12 +893,13 @@ def change_nickname(settings: "SettingParams", old_value: str, new_value: str):
                             remove_alias_by_api360(settings, user['id'], new_value)    
     
     if not settings.skip_scim_api_call:
-        if new_value in target_user[0]['aliases']:
+        if new_value in [r.lower() for r in target_user[0]['aliases']]:
             remove_alias_in_scim(target_user[0]["id"], new_value)
 
         for contact in target_user[0]['contacts']:
-            if contact['type'] == 'email' and contact['value'].split('@')[0] == new_value:
+            if contact['type'] == 'email' and contact['value'].split('@')[0].lower() == new_value:
                 remove_email_in_scim(target_user[0]["id"], new_value)
+    
 
     logger.info(f"Changing nickname of user {old_value} to {new_value}")
     raw_data = {'nickname': new_value}
@@ -914,7 +924,9 @@ def change_nickname(settings: "SettingParams", old_value: str, new_value: str):
     if not settings.skip_scim_api_call:
         remove_alias_in_scim(target_user[0]["id"], old_value)
 
-    users = get_all_api360_users(settings, True)
+    logger.info("Reload list of users to reflect changes in nickname.")
+    settings.all_users = None
+    # users = get_all_api360_users(settings, True)
 
 
 def remove_alias_by_api360(settings: "SettingParams", user_id: str, alias: str):
@@ -2209,7 +2221,7 @@ def get_shared_mailboxes_from_api(settings: "SettingParams"):
                     time.sleep(RETRIES_DELAY_SEC * retries)
                     retries += 1
                 else:
-                    logger.error(f"Forcing exit without getting data.")
+                    logger.error("Forcing exit without getting data.")
                     return False, []
             else:
                 retries = 1
@@ -2248,7 +2260,7 @@ def get_shared_mailbox_details_from_api(settings: "SettingParams", shared_mailbo
                     time.sleep(RETRIES_DELAY_SEC * retries)
                     retries += 1
                 else:
-                    logger.error(f"Forcing exit without getting data.")
+                    logger.error("Forcing exit without getting data.")
                     return
             else:
                 break
@@ -2528,7 +2540,7 @@ if __name__ == "__main__":
     logger.debug(f"ORG_ID_ARG: {settings.org_id}")
     logger.debug(f"SCIM_DOMAIN_ID_ARG: {settings.domain_id}")
     logger.debug(f"IgnoreUsernameDomain: {settings.ignore_user_domain}")
-    
+
     try:
         main(settings)
 
