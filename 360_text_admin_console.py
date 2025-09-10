@@ -13,6 +13,23 @@ import argparse
 import csv
 import re
 
+# Rich imports for beautiful console output
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+from rich.prompt import Prompt, Confirm
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.logging import RichHandler
+from rich.tree import Tree
+from rich.columns import Columns
+from rich.align import Align
+from rich.layout import Layout
+from rich.live import Live
+from rich.status import Status
+from rich import box
+from rich.markdown import Markdown
+
 DEFAULT_360_SCIM_API_URL = "https://{domain_id}.scim-api.passport.yandex.net/"
 DEFAULT_360_API_URL = "https://api360.yandex.net"
 DEFAULT_360_API_URL_V2 = "https://cloud-api.yandex.net/v1/admin/org"
@@ -22,18 +39,35 @@ LOG_FILE = "360_text_admin_console.log"
 RETRIES_DELAY_SEC = 2
 SLEEP_TIME_BETWEEN_API_CALLS = 0.5
 ALL_USERS_REFRESH_IN_MINUTES = 15
+# MAX value is 1000
+USERS_PER_PAGE_FROM_API = 1000
+# MAX value is 1000
+GROUPS_PER_PAGE_FROM_API = 1000
 
 EXIT_CODE = 1
 
+# Initialize Rich console
+console = Console()
+
+# Setup logger with Rich handler
 logger = logging.getLogger("change_scim_user_name")
 logger.setLevel(logging.DEBUG)
-console_handler = logging.StreamHandler()
+
+# Rich console handler for beautiful colored output
+console_handler = RichHandler(
+    console=console,
+    show_time=True,
+    show_path=False,
+    markup=True,
+    rich_tracebacks=True
+)
 console_handler.setLevel(logging.INFO)
-console_handler.setFormatter(logging.Formatter('%(asctime)s.%(msecs)03d %(levelname)s:\t%(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
-#file_handler = handlers.TimedRotatingFileHandler(LOG_FILE, when='D', interval=1, backupCount=30, encoding='utf-8')
+
+# File handler remains the same
 file_handler = handlers.RotatingFileHandler(LOG_FILE, maxBytes=10* 1024 * 1024,  backupCount=5, encoding='utf-8')
 file_handler.setLevel(logging.DEBUG)
 file_handler.setFormatter(logging.Formatter('%(asctime)s.%(msecs)03d %(levelname)s:\t%(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 
@@ -57,6 +91,8 @@ class SettingParams:
     all_groups : list
     all_groups_get_timestamp : datetime
     ignore_user_domain : bool
+    users_2fa_output_file : str
+    users_2fa_input_file : str
 
 def get_settings():
     exit_flag = False
@@ -72,6 +108,8 @@ def get_settings():
         default_email_output_file = os.environ.get("DEFAULT_EMAIL_OUTPUT_FILE_ARG", "default_email_output.csv"),
         default_email_input_file = os.environ.get("DEFAULT_EMAIL_INPUT_FILE_ARG", "default_email_input.csv"),
         forward_rules_output_file  = os.environ.get("DEFAULT_FORWARD_RULES_OUTPUT_FILE_ARG", "forward_rules_output.csv"),
+        users_2fa_output_file  = os.environ.get("DEFAULT_2FA_SETTINGS_OUTPUT_FILE_ARG", "users_2fa_output.csv"),
+        users_2fa_input_file  = os.environ.get("DEFAULT_2FA_SETTINGS_INPUT_FILE_ARG", "users_2fa_input.csv"),
         skip_scim_api_call = False,
         target_group = {},
         all_users = [],
@@ -84,7 +122,7 @@ def get_settings():
     )
 
     if not settings.scim_token:
-        logger.info("SCIM_TOKEN_ARG is not set")
+        logger.warning("SCIM_TOKEN_ARG is not set")
         scim_token_bad = True
 
     if settings.domain_id.strip() == "":
@@ -103,9 +141,15 @@ def get_settings():
 
     if not settings.default_email_input_file:
         settings.default_email_input_file = "default_email_input.csv"
+
+    if not settings.users_2fa_output_file:
+        settings.users_2fa_output_file = "users_2fa_output.csv"
+    
+    if not settings.users_2fa_input_file:
+        settings.users_2fa_input_file = "users_2fa_input.csv"
     
     if not settings.oauth_token:
-        logger.info("OAUTH_TOKEN_ARG is not set")
+        logger.error("OAUTH_TOKEN_ARG is not set")
         oauth_token_bad = True
 
     if not settings.org_id:
@@ -114,12 +158,12 @@ def get_settings():
 
     if not (scim_token_bad or exit_flag):
         if not check_scim_token(settings.scim_token, settings.domain_id):
-            logger.info("SCIM_TOKEN_ARG is not valid")
+            logger.error("SCIM_TOKEN_ARG is not valid")
             scim_token_bad = True
 
     if not (oauth_token_bad or exit_flag):
         if not check_oauth_token(settings.oauth_token, settings.org_id):
-            logger.info("OAUTH_TOKEN_ARG is not valid")
+            logger.error("OAUTH_TOKEN_ARG is not valid")
             oauth_token_bad = True
 
     if scim_token_bad:
@@ -200,31 +244,42 @@ def parse_arguments():
 
 def change_SCIM_username_manually(settings: "SettingParams"):
     """Интерактивный режим для ввода параметров."""
+    
+    console.print(Panel(
+        "[bold blue]Manual SCIM Username Change[/bold blue]\n"
+        "Enter old and new username values separated by space",
+        title="[green]SCIM Username Management[/green]",
+        border_style="blue"
+    ))
 
-    value = input("Enter old and new value of userName, separated by space: ").strip()
+    value = Prompt.ask("[bold yellow]Enter old and new value of userName, separated by space[/bold yellow]").strip()
     if not value:
-        logger.error("String can not be empty.")
+        console.print("[bold red]❌ String cannot be empty.[/bold red]")
+        console.input("[dim]Press Enter to continue...[/dim]")
         return
     
     if len(value.split()) != 2:
-        logger.error("There must be exactly two arguments.")
+        console.print("[bold red]❌ There must be exactly two arguments.[/bold red]")
+        console.input("[dim]Press Enter to continue...[/dim]")
         return
     
     old_value, new_value = value.split()
     single_mode(settings, old_value, new_value)
 
 def single_mode(settings: "SettingParams", old_value, new_value):
-    users  = get_all_scim_users(settings)
+    with console.status("[bold green]Loading SCIM users...", spinner="dots"):
+        users = get_all_scim_users(settings)
+    
     if users:
         old_user = next((item for item in users if item["userName"] == old_value.lower()), None)
         if not old_user:
-            logger.error(f"User {old_value} not found.")
+            console.print(f"[bold red]❌ User {old_value} not found.[/bold red]")
             return
-        new_user= next((item for item in users if item["userName"] == new_value.lower()), None)
+        new_user = next((item for item in users if item["userName"] == new_value.lower()), None)
         if new_user:
-            logger.error(f"User {old_value} already exist in system. Select another new value for userName.")
+            console.print(f"[bold red]❌ User {new_value} already exists in system. Select another new value for userName.[/bold red]")
             return
-        logger.info(f"User {old_value} found. UID: {old_user['id']}. Start changing userName to {new_value}...")
+        console.print(f"[green]✅ User {old_value} found. UID: {old_user['id']}. Starting change to {new_value}...[/green]")
         uid = old_user["id"]
         headers = {
                 "Authorization": f"Bearer {settings.scim_token}"
@@ -260,13 +315,15 @@ def single_mode(settings: "SettingParams", old_value, new_value):
                         logger.error(f"Error. Patching user {old_value} to {new_value} failed.")
                         break
                 else:
-                    logger.info(f"Success - User {old_value} changed to {new_value}.")
+                    console.print(f"[bold green]🎉 Success! User {old_value} changed to {new_value}.[/bold green]")
                     break
 
         except Exception as e:
             logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
     else:
-        logger.debug("List of users is empty.")
+        logger.error("List of SCIM users is empty.")
+        console.input("[dim]Press Enter to continue...[/dim]")
+        
 
 def main(settings: "SettingParams"):
     """Основная функция скрипта."""
@@ -310,18 +367,14 @@ def main(settings: "SettingParams"):
                 elif attribute.lower() == "nickname":
                     change_nickname(settings, old_value, new_value)
             else:
-                logger.info("Need confirmation.")
-                answer = input("Need confirmation (yes/no): ").strip().lower()
-                while answer not in ["yes", "no"]:
-                    logger.warning("Enter 'yes' или 'no'")
-                    answer = input("Need confirmation (yes/no): ").strip().lower()
-                if answer == "yes":
+                console.print("[bold yellow]⚠️  Need confirmation.[/bold yellow]")
+                if Confirm.ask(f"[bold yellow]Confirm changing {attribute} from '{old_value}' to '{new_value}'?[/bold yellow]"):
                     if attribute.lower() == "username":
                         single_mode(settings, old_value, new_value)
                     elif attribute.lower() == "nickname":
                         change_nickname(settings, old_value, new_value)
                 else:
-                    logger.info("Execution canceled.")
+                    console.print("[red]❌ Execution canceled.[/red]")
                     sys.exit(0)
 
     except Exception as e:
@@ -329,20 +382,42 @@ def main(settings: "SettingParams"):
         sys.exit(1)
 
 def main_menu(settings: "SettingParams"):
-
     while True:
-        print("\n")
-        print("Select option:")
-        print("1. Work with SCIM userName attribute or with API 360 nickname attribute.")
-        print("2. Get user info.")
-        print("3. Get group info and manage send permission.")
-        print("4. Work with email settings.")
+        console.clear()
+        
+        # Create main menu panel
+        menu_content = Text()
+        menu_content.append("🔧 Yandex 360 Text Admin Console\n\n", style="bold blue")
+        menu_content.append("1. ", style="bold cyan")
+        menu_content.append("Work with SCIM userName attribute or with API 360 nickname attribute\n", style="white")
+        menu_content.append("2. ", style="bold cyan")
+        menu_content.append("Get user info\n", style="white")
+        menu_content.append("3. ", style="bold cyan")
+        menu_content.append("Get group info and manage send permission\n", style="white")
+        menu_content.append("4. ", style="bold cyan")
+        menu_content.append("Work with email settings\n", style="white")
+        menu_content.append("5. ", style="bold cyan")
+        menu_content.append("2FA settings\n\n", style="white")
+        menu_content.append("0 or Ctrl+C. ", style="bold red")
+        menu_content.append("Exit", style="red")
 
-        print("0. Exit")
-        choice = input("Enter your choice (0-4) or Ctrl+C: ")
+        panel = Panel(
+            menu_content,
+            title="[bold green]Main Menu[/bold green]",
+            border_style="blue",
+            padding=(1, 2)
+        )
+        
+        console.print(panel)
+        
+        choice = Prompt.ask(
+            "[bold yellow]Enter your choice[/bold yellow]",
+            choices=["0", "1", "2", "3", "4", "5"],
+            default="0"
+        )
 
         if choice == "0":
-            print("Goodbye!")
+            console.print(Panel("[bold green]Goodbye! 👋[/bold green]", border_style="green"))
             break
         elif choice == "1":
             submenu_1(settings)
@@ -352,214 +427,370 @@ def main_menu(settings: "SettingParams"):
             submenu_3(settings)
         elif choice == "4":
             submenu_4(settings)
-        else:
-            print("Invalid choice. Please try again.")
+        elif choice == "5":
+            submenu_5(settings)
 
 def submenu_1(settings: "SettingParams"):
     while True:
-        print("\n")
-        print("=== Work with SCIM userName attribute or with API 360 nickname attribute ===")
-        print("------------------------------ Config params -------------------------------")
-        print(f'New loginName format: {settings.new_login_default_format}')
-        print("----------------------------------------------------------------------------")
-        print("\n")
-        print("Select option:")
-        print("1. Set new SCIM userName format (default: alias@domail.tld).")
-        print("2. Create SCIM data file for modification in next step.")
-        print("3. Use users file to change SCIM userName of users.")
-        print("4. Enter old and new value of userName manually and confirm renaming.")
-        print("5. Change nickname of single user.")
-        print("6. Check alias for user.")
-        print("7. Show user attributes and save their to file.")
-        print("8. Download all users to file (SCIM и API) protocols.")
-        print("0 or empty string. Back to main menu.")
+        console.clear()
+        
+        # Create config info panel
+        config_table = Table(show_header=False, box=box.SIMPLE)
+        config_table.add_column("Parameter", style="cyan")
+        config_table.add_column("Value", style="green")
+        config_table.add_row("New loginName format:", settings.new_login_default_format)
+        
+        config_panel = Panel(
+            config_table,
+            title="[bold blue]Config Parameters[/bold blue]",
+            border_style="blue"
+        )
+        
+        # Create menu content
+        menu_content = Text()
+        menu_content.append("🔧 SCIM userName & API 360 nickname Management\n\n", style="bold blue")
+        menu_content.append("1. ", style="bold cyan")
+        menu_content.append("Set new SCIM userName format (default: alias@domain.tld)\n", style="white")
+        menu_content.append("2. ", style="bold cyan")
+        menu_content.append("Create SCIM data file for modification in next step\n", style="white")
+        menu_content.append("3. ", style="bold cyan")
+        menu_content.append("Use users file to change SCIM userName of users\n", style="white")
+        menu_content.append("4. ", style="bold cyan")
+        menu_content.append("Enter old and new value of userName manually and confirm renaming\n", style="white")
+        menu_content.append("5. ", style="bold cyan")
+        menu_content.append("Change nickname of single user\n", style="white")
+        menu_content.append("6. ", style="bold cyan")
+        menu_content.append("Check alias for user\n", style="white")
+        menu_content.append("7. ", style="bold cyan")
+        menu_content.append("Show user attributes and save their to file\n", style="white")
+        menu_content.append("8. ", style="bold cyan")
+        menu_content.append("Download all users to file (SCIM и API) protocols\n\n", style="white")
+        menu_content.append("0 or empty string. ", style="bold red")
+        menu_content.append("Back to main menu", style="red")
 
-        choice = input("Enter your choice (0-5) or Ctrl+C to exit script: ")
+        menu_panel = Panel(
+            menu_content,
+            title="[bold green]SCIM & Nickname Management[/bold green]",
+            border_style="green",
+            padding=(1, 2)
+        )
+        
+        console.print(config_panel)
+        console.print(menu_panel)
+        
+        choice = Prompt.ask(
+            "[bold yellow]Enter your choice[/bold yellow]",
+            choices=["0", "1", "2", "3", "4", "5", "6", "7", "8"],
+            default="0"
+        )
 
-        if choice == "0" or choice == "":
+        if choice == "0":
             break
         elif choice == "1":
-            print('\n')
             set_new_loginName_format(settings)
         elif choice == "2":
             if settings.skip_scim_api_call:
-                logger.info("No SCIM config found. Skip action.")
+                console.print("[bold red]⚠️  No SCIM config found. Skip action.[/bold red]")
+                console.input("[dim]Press Enter to continue...[/dim]")
             else:
-                print('\n')
                 create_SCIM_userName_file(settings)
         elif choice == "3":
             if settings.skip_scim_api_call:
-                logger.info("No SCIM config found. Skip action.")
+                console.print("[bold red]⚠️  No SCIM config found. Skip action.[/bold red]")
+                console.input("[dim]Press Enter to continue...[/dim]")
             else:
-                print('\n')
                 update_users_from_SCIM_userName_file(settings)
         elif choice == "4":
             if settings.skip_scim_api_call:
-                logger.info("No SCIM config found. Skip action.")
+                console.print("[bold red]⚠️  No SCIM config found. Skip action.[/bold red]")
+                console.input("[dim]Press Enter to continue...[/dim]")
             else:
-                print('\n')
                 change_SCIM_username_manually(settings)
         elif choice == "5":
-            print('\n')
             change_nickname_prompt(settings)
         elif choice == "6":
-            print('\n')
             check_alias_prompt(settings)
-        elif choice == "8":
-            print('\n')
-            download_users_attrib_to_file(settings)
         elif choice == "7":
-            print('\n')
             show_user_attributes(settings)
-        else:
-            print("Invalid choice. Please try again.")
+        elif choice == "8":
+            download_users_attrib_to_file(settings)
     return
 
 def submenu_2(settings: "SettingParams"):
     while True:
-        print("\n")
-        print("============================== Get user info ===============================")
-        #print("\n")
-        print("Select option:")
-        print("1. Check alias for user.")
-        print("2. Download all users to file (SCIM и API) protocols.")
-        print("3. Show user attributes and save their to file.")
-        print("0 or empty string. Back to main menu.")
+        console.clear()
+        
+        # Create menu content
+        menu_content = Text()
+        menu_content.append("👤 User Information Management\n\n", style="bold blue")
+        menu_content.append("1. ", style="bold cyan")
+        menu_content.append("Check alias for user\n", style="white")
+        menu_content.append("2. ", style="bold cyan")
+        menu_content.append("Download all users to file (SCIM и API) protocols\n", style="white")
+        menu_content.append("3. ", style="bold cyan")
+        menu_content.append("Show user attributes and save their to file\n\n", style="white")
+        menu_content.append("0 or empty string. ", style="bold red")
+        menu_content.append("Back to main menu", style="red")
 
-        choice = input("Enter your choice (0-3) or Ctrl+C to exit script: ")
+        menu_panel = Panel(
+            menu_content,
+            title="[bold green]Get User Info[/bold green]",
+            border_style="green",
+            padding=(1, 2)
+        )
+        
+        console.print(menu_panel)
+        
+        choice = Prompt.ask(
+            "[bold yellow]Enter your choice[/bold yellow]",
+            choices=["0", "1", "2", "3"],
+            default="0"
+        )
 
-        if choice == "0" or choice == "":
+        if choice == "0":
             break
         elif choice == "1":
-            print('\n')
             check_alias_prompt(settings)
         elif choice == "2":
-            print('\n')
             download_users_attrib_to_file(settings)
         elif choice == "3":
-            print('\n')
             show_user_attributes(settings)
-        else:
-            print("Invalid choice. Please try again.")
 
     return
 
 def submenu_3(settings: "SettingParams"):
     while True:
-        print("\n")
-        print("============================== Get group info ===============================")
-        #print("\n")
-        print("Select option:")
-        print("1. Show group attributes and save their to file.")
-        print("2. Show approve senders for group.")
-        print("3. Manage approve senders for group.")
-        print("0 or empty string. Back to main menu.")
+        console.clear()
+        
+        # Create menu content
+        menu_content = Text()
+        menu_content.append("👥 Group Information & Permissions Management\n\n", style="bold blue")
+        menu_content.append("1. ", style="bold cyan")
+        menu_content.append("Show group attributes and save their to file\n", style="white")
+        menu_content.append("2. ", style="bold cyan")
+        menu_content.append("Show approve senders for group\n", style="white")
+        menu_content.append("3. ", style="bold cyan")
+        menu_content.append("Manage approve senders for group\n\n", style="white")
+        menu_content.append("0 or empty string. ", style="bold red")
+        menu_content.append("Back to main menu", style="red")
 
-        choice = input("Enter your choice (0-3) or Ctrl+C to exit script: ")
+        menu_panel = Panel(
+            menu_content,
+            title="[bold green]Get Group Info[/bold green]",
+            border_style="green",
+            padding=(1, 2)
+        )
+        
+        console.print(menu_panel)
+        
+        choice = Prompt.ask(
+            "[bold yellow]Enter your choice[/bold yellow]",
+            choices=["0", "1", "2", "3"],
+            default="0"
+        )
 
-        if choice == "0" or choice == "":
+        if choice == "0":
             break
         elif choice == "1":
-            print('\n')
             save_group_data_prompt(settings)
         elif choice == "2":
-            print('\n')
             show_mailing_list_permissions(settings)
         elif choice == "3":
             subsubmenu_30(settings)
-        else:
-            print("Invalid choice. Please try again.")
 
     return
 
-
 def submenu_4(settings: "SettingParams"):
     while True:
-        print("\n")
-        print("====================== Work with email settings =============================")
-        #print("\n")
-        print("Select option:")
-        print("1. Create file for default email modification.")
-        print("2. Update default email from file.")
-        print("3. Get forward rules for single user.")
-        print("4. Download forward rules for all users.")
-        print("5. Clear forward rules for users.")
-        print("0 or empty string. Back to main menu.")
+        console.clear()
+        
+        # Create menu content
+        menu_content = Text()
+        menu_content.append("📧 Email Settings Management\n\n", style="bold blue")
+        menu_content.append("1. ", style="bold cyan")
+        menu_content.append("Create file for default email modification\n", style="white")
+        menu_content.append("2. ", style="bold cyan")
+        menu_content.append("Update default email from file\n", style="white")
+        menu_content.append("3. ", style="bold cyan")
+        menu_content.append("Get forward rules for single user\n", style="white")
+        menu_content.append("4. ", style="bold cyan")
+        menu_content.append("Download forward rules for all users\n", style="white")
+        menu_content.append("5. ", style="bold cyan")
+        menu_content.append("Clear forward rules for users\n\n", style="white")
+        menu_content.append("0 or empty string. ", style="bold red")
+        menu_content.append("Back to main menu", style="red")
 
-        choice = input("Enter your choice (0-5) or Ctrl+C to exit script: ")
+        menu_panel = Panel(
+            menu_content,
+            title="[bold green]Work with Email Settings[/bold green]",
+            border_style="green",
+            padding=(1, 2)
+        )
+        
+        console.print(menu_panel)
+        
+        choice = Prompt.ask(
+            "[bold yellow]Enter your choice[/bold yellow]",
+            choices=["0", "1", "2", "3", "4", "5"],
+            default="0"
+        )
 
-        if choice == "0" or choice == "":
+        if choice == "0":
             break
         elif choice == "1":
-            print('\n')
             default_email_create_file(settings)
         elif choice == "2":
-            print('\n')
             default_email_update_from_file(settings)
         elif choice == "3":
-            print('\n')
             forward_rules_get_for_user(settings)
         elif choice == "4":
-            print('\n')
-            forward_rules_dowanload_for_all_users(settings)
-        elif choice== "5":
-            print('\n')
+            forward_rules_download_for_all_users(settings)
+        elif choice == "5":
             forward_rules_clear_for_user(settings)
-        else:
-            print("Invalid choice. Please try again.")
+
+    return
+
+def submenu_5(settings: "SettingParams"):
+    while True:
+        console.clear()
+        
+        # Create menu content
+        menu_content = Text()
+        menu_content.append("🔐 2FA Settings Management\n\n", style="bold blue")
+        menu_content.append("1. ", style="bold cyan")
+        menu_content.append("Download 2FA settings for users\n", style="white")
+        menu_content.append("2. ", style="bold cyan")
+        menu_content.append("Get 2FA settings for single user\n", style="white")
+        menu_content.append("3. ", style="bold cyan")
+        menu_content.append("Reset personal phone for single user\n", style="white")
+        menu_content.append("4. ", style="bold cyan")
+        menu_content.append("Logout single user\n", style="white")
+        menu_content.append("5. ", style="bold cyan")
+        menu_content.append("Logout users from file\n", style="white")
+        menu_content.append("6. ", style="bold cyan")
+        menu_content.append("Logout users with 2fa set and no security phone configured\n\n", style="white")
+        menu_content.append("0 or empty string. ", style="bold red")
+        menu_content.append("Back to main menu", style="red")
+
+        menu_panel = Panel(
+            menu_content,
+            title="[bold green]2FA Settings[/bold green]",
+            border_style="green",
+            padding=(1, 2)
+        )
+        
+        console.print(menu_panel)
+        
+        choice = Prompt.ask(
+            "[bold yellow]Enter your choice[/bold yellow]",
+            choices=["0", "1", "2", "3", "4", "5", "6"],
+            default="0"
+        )
+
+        if choice == "0":
+            break
+        elif choice == "1":
+            mfa_download_settings(settings)
+        elif choice == "2":
+            mfa_prompt_settings_for_user(settings)
+        elif choice == "3":
+            mfa_reset_personal_phone_prompt(settings)
+        elif choice == "4":
+            mfa_logout_single_user_prompt(settings)
+        elif choice == "5":
+            mfa_logout_users_from_file(settings)
+        elif choice == "6":
+            mfa_logout_users_with_no_phone(settings)
 
     return
 
 def subsubmenu_30(settings: "SettingParams"):
     while True:
-        print("\n")
-        print("====================== Manage group send permissions =============================")
-        print("------------------------------ Current params -------------------------------")
-        print(f'Target group Name - {settings.target_group.get("name","")}')
-        print(f'Target group ID - {settings.target_group.get("id","")}')
-        print(f'Target group emailId - {settings.target_group.get("emailId","")}')
-        print("----------------------------------------------------------------------------")
-        #print("\n")
-        print("Select option:")
-        print("1. Set target group.")
-        print("2. Add users to allow list.")
-        print("3. Remove users from allow list.")
-        print("4. Grand all users send permission.")
-        print("5. Add/Remove shared mailbox to allow list.")
-        print("0 or empty string. Back to main menu.")
+        console.clear()
+        
+        # Create current params table
+        params_table = Table(show_header=False, box=box.SIMPLE)
+        params_table.add_column("Parameter", style="cyan")
+        params_table.add_column("Value", style="green")
+        params_table.add_row("Target group Name:", settings.target_group.get("name", "[red]Not set[/red]"))
+        params_table.add_row("Target group ID:", str(settings.target_group.get("id", "[red]Not set[/red]")))
+        params_table.add_row("Target group emailId:", str(settings.target_group.get("emailId", "[red]Not set[/red]")))
+        
+        params_panel = Panel(
+            params_table,
+            title="[bold blue]Current Parameters[/bold blue]",
+            border_style="blue"
+        )
+        
+        # Create menu content
+        menu_content = Text()
+        menu_content.append("🔐 Group Send Permissions Management\n\n", style="bold blue")
+        menu_content.append("1. ", style="bold cyan")
+        menu_content.append("Set target group\n", style="white")
+        menu_content.append("2. ", style="bold cyan")
+        menu_content.append("Add users to allow list\n", style="white")
+        menu_content.append("3. ", style="bold cyan")
+        menu_content.append("Remove users from allow list\n", style="white")
+        menu_content.append("4. ", style="bold cyan")
+        menu_content.append("Grant all users send permission\n", style="white")
+        menu_content.append("5. ", style="bold cyan")
+        menu_content.append("Add/Remove shared mailbox to allow list\n\n", style="white")
+        menu_content.append("0 or empty string. ", style="bold red")
+        menu_content.append("Back to main menu", style="red")
 
-        choice = input("Enter your choice (0-4) or Ctrl+C to exit script: ")
+        menu_panel = Panel(
+            menu_content,
+            title="[bold green]Manage Group Send Permissions[/bold green]",
+            border_style="green",
+            padding=(1, 2)
+        )
+        
+        console.print(params_panel)
+        console.print(menu_panel)
+        
+        choice = Prompt.ask(
+            "[bold yellow]Enter your choice[/bold yellow]",
+            choices=["0", "1", "2", "3", "4", "5"],
+            default="0"
+        )
 
-        if choice == "0" or choice == "":
+        if choice == "0":
             break
         elif choice == "1":
-            print('\n')
             send_perm_set_target_group(settings)
         elif choice == "2":
-            print('\n')
             send_perm_add_users_to_allow_list_prompt(settings)
         elif choice == "3":
-            print('\n')
             send_perm_remove_users_from_allow_list(settings)
         elif choice == "4":
-            print('\n')
             send_perm_grand_all_users(settings)
         elif choice == "5":
-            print('\n')
             send_perm_shared_mailbox(settings)
-        else:
-            print("Invalid choice. Please try again.")
 
     return
 
 def set_new_loginName_format(settings: "SettingParams"):
-    answer = input("Enter format of new userLogin name (space to use default format alias@domain.tld):\n")
-    if answer:
-        if answer.strip() == "":
-            settings.new_login_default_format = "alias@domain.tld"
-        else:
-            settings.new_login_default_format = answer.strip()
-
+    console.print(Panel(
+        "[bold blue]Set New Login Name Format[/bold blue]\n"
+        f"Current format: [green]{settings.new_login_default_format}[/green]\n"
+        "Default format: [cyan]alias@domain.tld[/cyan]",
+        title="[green]Login Format Configuration[/green]",
+        border_style="blue"
+    ))
+    
+    answer = Prompt.ask(
+        "[bold yellow]Enter format of new userLogin name[/bold yellow]",
+        default=settings.new_login_default_format
+    )
+    
+    if answer.strip() == "":
+        settings.new_login_default_format = "alias@domain.tld"
+        console.print("[green]✅ Format set to default: alias@domain.tld[/green]")
+    else:
+        settings.new_login_default_format = answer.strip()
+        console.print(f"[green]✅ Format set to: {settings.new_login_default_format}[/green]")
+    
+    console.input("[dim]Press Enter to continue...[/dim]")
     return settings
 
 def get_all_api360_users(settings: "SettingParams", force = False):
@@ -581,14 +812,14 @@ def get_all_shared_mailboxes(settings: "SettingParams", force = False):
 
         result, settings.shared_mailboxes = get_shared_mailbox_detail(settings)
         if not result:
-            logger.info("Can not get shared mailboxes data from Y360 API.")
+            logger.error("Can not get shared mailboxes data from Y360 API.")
         settings.shared_mailboxes_get_timestamp = datetime.now()
     else:
         if (datetime.now() - settings.shared_mailboxes_get_timestamp).total_seconds() > ALL_USERS_REFRESH_IN_MINUTES * 60:
             logger.info("Getting all shared mailboxes of the organisation from API...")
             result, settings.shared_mailboxes = get_shared_mailbox_detail(settings)
             if not result:
-                logger.info("Can not get shared mailboxes data from Y360 API.")
+                logger.error("Can not get shared mailboxes data from Y360 API.")
             settings.shared_mailboxes_get_timestamp = datetime.now()
     return settings.shared_mailboxes
 
@@ -615,70 +846,115 @@ def http_get_request(url, headers):
             response = requests.get(url, headers=headers)
             logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
             if response.status_code != HTTPStatus.OK.value:
-                print(f"!!! ERROR !!! during GET request url - {url}: {response.status_code}. Error message: {response.text}")
+                logger.error(f"!!! ERROR !!! during GET request url - {url}: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
-                    print(f"Retrying ({retries+1}/{MAX_RETRIES})")
+                    logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
                     time.sleep(RETRIES_DELAY_SEC * retries)
                     retries += 1
                 else:
-                    print(f"!!! Error !!! during GET request url - {url}.")
+                    logger.error(f"!!! Error !!! during GET request url - {url}.")
                     break
             else:
                 break
 
     except requests.exceptions.RequestException as e:
-        print(f"!!! ERROR !!! {type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+        logger.error(f"!!! ERROR !!! {type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
 
     return response
 
 def get_all_api360_users_from_api(settings: "SettingParams"):
     logger.info("Getting all users of the organisation...")
-    url = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users?perPage=100"
+    url = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users"
     headers = {"Authorization": f"OAuth {settings.oauth_token}"}
     has_errors = False
-    response = http_get_request(url, headers=headers)
-    if response.status_code == HTTPStatus.OK.value:
-        users = response.json()['users']
-        for i in range(2, response.json()["pages"] + 1):
-            logger.info(f"Getting users from API, page {i} of {response.json()['pages']} (one page = 100 users)")
-            response = http_get_request(f"{url}&page={i}", headers=headers)
-            if response.status_code == HTTPStatus.OK.value:
-                users.extend(response.json()['users'])
-            else:
-                has_errors = True
-                break
-    else:
-        has_errors = True
+    users = []
+    current_page = 1
+    last_page = 1
+    while current_page <= last_page:
+        params = {'page': current_page, 'perPage': USERS_PER_PAGE_FROM_API}
+        try:
+            retries = 1
+            while True:
+                logger.debug(f"GET URL - {url}")
+                response = requests.get(url, headers=headers, params=params)
+                logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+                if response.status_code != HTTPStatus.OK.value:
+                    logger.error(f"!!! ERROR !!! during GET request url - {url}: {response.status_code}. Error message: {response.text}")
+                    if retries < MAX_RETRIES:
+                        logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
+                        time.sleep(RETRIES_DELAY_SEC * retries)
+                        retries += 1
+                    else:
+                        has_errors = True
+                        break
+                else:
+                    for user in response.json()['users']:
+                        if not user.get('isRobot') and int(user["id"]) >= 1130000000000000:
+                            users.append(user)
+                    logger.debug(f"Get {len(response.json()['users'])} users from page {current_page} (total {last_page} page(s)).")
+                    current_page += 1
+                    last_page = response.json()['pages']
+                    break
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"!!! ERROR !!! {type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+            has_errors = True
+            break
+
+        if has_errors:
+            break
 
     if has_errors:
-        print("!!! Error !!! during GET request. Return empty list.")
+        print("There are some error during GET requests. Return empty user list.")
         return []
     
     return users
 
 def get_all_groups_from_api360(settings: "SettingParams"):
+
     logger.info("Getting all groups of the organisation...")
-    url = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/groups?perPage=100"
+    url = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/groups"
     headers = {"Authorization": f"OAuth {settings.oauth_token}"}
+    has_errors = False
     groups = []
-    try:
-        page = 1
-        while True:
-            logger.debug(f"GET url - {url}&page={page}")
-            response = requests.get(f"{url}&page={page}", headers=headers)
-            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
-            if response.ok:
-                data = response.json()
-                groups.extend(data['groups'])
-                if page >= data.get("pages", 1):
+    current_page = 1
+    last_page = 1
+    while current_page <= last_page:
+        params = {'page': current_page, 'perPage': GROUPS_PER_PAGE_FROM_API}
+        try:
+            retries = 1
+            while True:
+                logger.debug(f"GET URL - {url}")
+                response = requests.get(url, headers=headers, params=params)
+                logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+                if response.status_code != HTTPStatus.OK.value:
+                    logger.error(f"!!! ERROR !!! during GET request url - {url}: {response.status_code}. Error message: {response.text}")
+                    if retries < MAX_RETRIES:
+                        logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
+                        time.sleep(RETRIES_DELAY_SEC * retries)
+                        retries += 1
+                    else:
+                        has_errors = True
+                        break
+                else:
+                    groups.extend(response.json()['groups'])
+                    logger.debug(f"Get {len(response.json()['groups'])} groups from page {current_page} (total {last_page} page(s)).")
+                    current_page += 1
+                    last_page = response.json()['pages']
                     break
-                page += 1
-            else:
-                logger.error(f"Error during GET request: {response.status_code}. Error message: {response.text}")
-                break
-    except requests.exceptions.RequestException as e:
-        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"!!! ERROR !!! {type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+            has_errors = True
+            break
+
+        if has_errors:
+            break
+
+    if has_errors:
+        logger.error("There are some error during GET requests. Return empty groups list.")
         return []
+    
     return groups
 
 def find_group_by_param(groups: list, search_string: str, search_type: str ):
@@ -806,57 +1082,128 @@ def change_nickname_prompt(settings: "SettingParams"):
     Returns:
         None
     """
+    console.print(Panel(
+        "[bold blue]Change User Nickname[/bold blue]\n"
+        "Enter old and new nickname values separated by space\n"
+        "[dim]Example: oldnick newnick[/dim]",
+        title="[green]Nickname Management[/green]",
+        border_style="blue"
+    ))
+    
     while True:
-        data = input("Enter old value and new value of nickname separated by space (empty sting to exit): ")
+        data = Prompt.ask(
+            "[bold yellow]Enter old value and new value of nickname separated by space[/bold yellow]",
+            default=""
+        )
+        
         if len(data.strip()) == 0:
             break
         elif len(data.split()) != 2:
-            logger.error("Invalid input. Please enter old value and new value separated by space.")
+            console.print("[bold red]❌ Invalid input. Please enter old value and new value separated by space.[/bold red]")
+            console.input("[dim]Press Enter to continue...[/dim]")
         else:
             old_value, new_value = data.split()
+            #with console.status(f"[bold green]Changing nickname from '{old_value}' to '{new_value}'...", spinner="dots"):
             change_nickname(settings, old_value, new_value)
+            #console.input("[dim]Press Enter to continue...[/dim]")
     return
 
 def check_alias_prompt(settings: "SettingParams"):
+    console.print(Panel(
+        "[bold blue]Check Alias Availability[/bold blue]\n"
+        "Enter alias names to check if they are already in use",
+        title="[green]Alias Checker[/green]",
+        border_style="blue"
+    ))
+    
     while True:
-        data = input("Enter alias (without domain) to check (empty sting to exit): ")
+        data = Prompt.ask(
+            "[bold yellow]Enter alias (without domain) to check[/bold yellow]",
+            default=""
+        )
+        
         if len(data.strip()) == 0:
             break
         elif len(data.split("@")) == 2:
-            data=data.split("@")[0]
+            data = data.split("@")[0]
 
         check_alias(settings, data.lower())
+        
     return
 
 def check_alias(settings: "SettingParams", alias: str):
-    logger.info(f"Checking alias {alias}")
+    console.print(f"[bold blue]🔍 Checking alias: [cyan]{alias}[/cyan][/bold blue]")
+    
     users = get_all_api360_users(settings)
     if not users:
-        logger.error("No users found.")
-    logger.info(f"{len(users)} users found.")
+        console.print("[bold red]❌ No users found.[/bold red]")
+        return
+    
+    console.print(f"[green]✅ Found {len(users)} users to check[/green]")
+    
+    # Create results table
+    results_table = Table(title=f"Alias Check Results for '{alias}'")
+    results_table.add_column("Type", style="cyan")
+    results_table.add_column("User", style="green")
+    results_table.add_column("ID", style="yellow")
+    results_table.add_column("Display Name", style="white")
+    
+    found_conflicts = False
     
     for user in users:
         if alias == user['nickname']:
-            logger.info(f"Alias _ {alias} _ already exists as nickname in user with nickname {user['nickname']}. User ID - {user['id']}.  User displayName - {user.get('displayName','')}.")
+            results_table.add_row(
+                "Nickname",
+                user['nickname'],
+                user['id'],
+                user.get('displayName', '')
+            )
+            found_conflicts = True
+            
         if alias in user['aliases']:
-            logger.info(f"Alias _ {alias} _ already exists as alias in user with nickname {user['nickname']}. User ID - {user['id']}.  User displayName - {user.get('displayName','')}.")
+            results_table.add_row(
+                "Alias",
+                user['nickname'],
+                user['id'],
+                user.get('displayName', '')
+            )
+            found_conflicts = True
+            
         for contact in user['contacts']:
             if contact['type'] == 'email' and contact['value'].split('@')[0] == alias:
-                logger.info(f"Alias _ {alias} _ already exists as email contact in user with nickname {user['nickname']}. User ID - {user['id']}. User displayName - {user.get('displayName','')}.")
+                results_table.add_row(
+                    "Email Contact",
+                    user['nickname'],
+                    user['id'],
+                    user.get('displayName', '')
+                )
+                found_conflicts = True
 
     scim_users = get_all_scim_users(settings)
-    if not scim_users:
-        logger.error("No users found.")
-    for user in scim_users:
-        if alias == user['userName'] or alias == user['userName'].split('@')[0]:
-            logger.info(f"Alias _ {alias} _ already exists as userName in _SCIM_ user with ID - {user['id']}.  User displayName - {user['displayName']}.")
+    if scim_users:
+        for user in scim_users:
+            if alias == user['userName'] or alias == user['userName'].split('@')[0]:
+                results_table.add_row(
+                    "SCIM userName",
+                    user['userName'],
+                    user['id'],
+                    user['displayName']
+                )
+                found_conflicts = True
+    
+    if found_conflicts:
+        console.print(f"[bold red]⚠️  Alias '{alias}' is already in use:[/bold red]")
+        console.print(results_table)
+        console.input("[dim]Press Enter to continue...[/dim]")
+    else:
+        console.print(f"[bold blue]✅ Alias '{alias}' is not found in Y360![/bold blue]")
 
 def change_nickname(settings: "SettingParams", old_value: str, new_value: str):
     logger.info(f"Changing nickname of user {old_value} to {new_value}")
     users = get_all_api360_users(settings, True)
     
     if not users:
-        logger.error("No users found.")
+        console.print("[bold red]❌ No users found.[/bold red]")
         return
     logger.info(f"{len(users)} users found.")
 
@@ -928,7 +1275,6 @@ def change_nickname(settings: "SettingParams", old_value: str, new_value: str):
     settings.all_users = None
     # users = get_all_api360_users(settings, True)
 
-
 def remove_alias_by_api360(settings: "SettingParams", user_id: str, alias: str):
 
     logger.info(f"Removing alias {alias} in _API360_ user {user_id}")
@@ -939,7 +1285,6 @@ def remove_alias_by_api360(settings: "SettingParams", user_id: str, alias: str):
         logger.debug(f"DELETE URL: {url}")
         
         while True:
-            logger.debug(f"DELETE url - {url}")
             response = requests.delete(url, headers=headers)
             logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
             if response.status_code != HTTPStatus.OK.value:
@@ -1048,7 +1393,6 @@ def remove_email_in_scim(user_id: str, alias: str):
     except requests.exceptions.RequestException as e:
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
 
-
 def create_SCIM_userName_file(settings: "SettingParams", onlyList = False):
 
     users = get_all_scim_users(settings)
@@ -1067,7 +1411,7 @@ def create_SCIM_userName_file(settings: "SettingParams", onlyList = False):
                     f.write(f"{user['id']};{user['displayName']};{user['userName']};{new_userName}\n")
             logger.info(f"{len(users)} users downloaded to file {settings.users_file}")
     else:
-        logger.info("No users found. Check your settings.")
+        logger.info("No users found from SCIM call. Check your settings.")
         return []
     return users
 
@@ -1103,13 +1447,14 @@ def update_users_from_SCIM_userName_file(settings: "SettingParams"):
     
     if not user_for_change:
         logger.error(f"File {settings.users_file} is empty.")
+        console.input("[dim]Press Enter to continue...[/dim]")
         return
     else:
         for user in user_for_change:
             logger.debug(f"Will modify - {temp}.")
 
-        answer = input(f"Modify userName SCIM attribute for {len(user_for_change)} users? (Y/n): ")
-        if answer.upper() not in ["Y", "YES"]:
+        if not Confirm.ask(f"[bold yellow]Modify userName SCIM attribute for {len(user_for_change)} users?[/bold yellow]"):
+            console.print("[yellow]Operation cancelled.[/yellow]")
             return
         
     headers = {
@@ -1157,8 +1502,23 @@ def update_users_from_SCIM_userName_file(settings: "SettingParams"):
             logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
 
 def show_user_attributes(settings: "SettingParams"):
+    console.print(Panel(
+        "[bold blue]Show User Attributes[/bold blue]\n"
+        "Enter target user in one of these formats:\n"
+        "• [cyan]id:<UID>[/cyan] - User ID\n"
+        "• [cyan]userName:<SCIM_USER_NAME>[/cyan] - SCIM username\n"
+        "• [cyan]<API_360_NICKNAME>[/cyan] - API 360 nickname\n"
+        "• [cyan]<API_360_ALIAS>[/cyan] - API 360 alias\n"
+        "• [cyan]<lastName>[/cyan] - User's last name",
+        title="[green]User Attributes Viewer[/green]",
+        border_style="blue"
+    ))
+    
     while True:
-        answer = input("Enter target user in format: id:<UID> or userName:<SCIM_USER_NAME> or <API_360_NICKNAME> or <API_360_ALIAS> or lastNamme (empty string to exit): ")
+        answer = Prompt.ask(
+            "[bold yellow]Enter target user[/bold yellow]",
+            default=""
+        )
         if not answer.strip():
             break
         if ":" in answer:
@@ -1185,6 +1545,7 @@ def show_user_attributes(settings: "SettingParams"):
         scim_users = get_all_scim_users(settings)  
         if not users:
             logger.error("No users found from API 360 calls. Check your settings.")
+            console.input("[dim]Press Enter to continue...[/dim]")
             break
         if not scim_users:
             if not settings.skip_scim_api_call:
@@ -1199,12 +1560,12 @@ def show_user_attributes(settings: "SettingParams"):
                         target_user = user
                         break
                 elif key == "nickname":
-                    if user["nickname"] == value or value in user["aliases"]:
+                    if user["nickname"].lower() == value or value in [r.lower() for r in  user["aliases"]]:
                         target_user = user
                         break
         elif key.lower() == "username":
             for user in scim_users:
-                if user["userName"] == value:
+                if user["userName"].lower() == value:
                     target_scim_user = user
                     break
         
@@ -1217,73 +1578,72 @@ def show_user_attributes(settings: "SettingParams"):
             logger.error(f"No user found for key {key} and value {value}.")
             break
         
-        logger.info("\n")
-        logger.info("--------------------------------------------------------")
-        logger.info(f'API 360 attributes for user with id: {target_user["id"]}')
-        logger.info("--------------------------------------------------------")
+        # Create API 360 attributes table
+        api_table = Table(title=f"API 360 attributes for user with id: {target_user['id']}")
+        api_table.add_column("Attribute", style="cyan")
+        api_table.add_column("Value", style="green")
+        
         for k, v in target_user.items():
             if k.lower() == "contacts":
-                logger.info("Contacts:")
-                for l in v: 
-                    for k1, v1 in l.items():  
-                        logger.info(f" - {k1}: {v1}")
-                    logger.info(" -")
+                contacts_str = ""
+                for contact in v:
+                    contacts_str += f"Type: {contact.get('type', '')}, Value: {contact.get('value', '')}\n"
+                api_table.add_row("Contacts", contacts_str.strip())
             elif k.lower() == "aliases":
                 if not v:
-                    logger.info("Aliases: []")
+                    api_table.add_row("Aliases", "[]")
                 else:
-                    logger.info("Aliases:")
-                    for l in v:
-                        logger.info(f" - {l}")
+                    aliases_str = "\n".join(v)
+                    api_table.add_row("Aliases", aliases_str)
             elif k.lower() == "name":
-                logger.info("Name:")
-                for k1, v1 in v.items():  
-                    logger.info(f" - {k1}: {v1}")
+                name_str = ""
+                for k1, v1 in v.items():
+                    name_str += f"{k1}: {v1}\n"
+                api_table.add_row("Name", name_str.strip())
             else:
-                logger.info(f"{k}: {v}")
-        logger.info("--------------------------------------------------------")
+                api_table.add_row(k, str(v))
+        
+        console.print(api_table)
         if not settings.skip_scim_api_call:
-            logger.info("--------------------------------------------------------")
-            logger.info(f'SCIM attributes for user with id: {target_scim_user["id"]}')
-            logger.info("--------------------------------------------------------")
+            # Create SCIM attributes table
+            scim_table = Table(title=f"SCIM attributes for user with id: {target_scim_user['id']}")
+            scim_table.add_column("Attribute", style="cyan")
+            scim_table.add_column("Value", style="green")
+            
             for k, v in target_scim_user.items():
                 if k.lower() == "emails":
-                    logger.info("Emails:")
-                    for l in v:
-                        for k1, v1 in l.items():   
-                            logger.info(f" - {k1}: {v1}")
-                        logger.info(" -")
-                elif k.lower() == "metadata":
-                    logger.info("Metadata:")
-                    for k1, v1 in v.items():  
-                        logger.info(f" - {k1}: {v1}")
-                elif k.lower() == "name":
-                    logger.info("name:")
-                    for k1, v1 in v.items():  
-                        logger.info(f" - {k1}: {v1}")
-                elif k.lower() == "meta":
-                    logger.info("meta:")
-                    for k1, v1 in v.items():  
-                        logger.info(f" - {k1}: {v1}")
+                    emails_str = ""
+                    for email in v:
+                        for k1, v1 in email.items():
+                            emails_str += f"{k1}: {v1}\n"
+                        emails_str += "---\n"
+                    scim_table.add_row("Emails", emails_str.strip())
+                elif k.lower() in ["metadata", "name", "meta"]:
+                    meta_str = ""
+                    for k1, v1 in v.items():
+                        meta_str += f"{k1}: {v1}\n"
+                    scim_table.add_row(k, meta_str.strip())
                 elif k.lower() == "phonenumbers":
-                    logger.info("phoneNumbers:")
-                    for l in v:
-                        for k1, v1 in l.items():  
-                            logger.info(f" - {k1}: {v1}")
-                        logger.info(" -")
+                    phones_str = ""
+                    for phone in v:
+                        for k1, v1 in phone.items():
+                            phones_str += f"{k1}: {v1}\n"
+                        phones_str += "---\n"
+                    scim_table.add_row("phoneNumbers", phones_str.strip())
                 elif k == "urn:ietf:params:scim:schemas:extension:yandex360:2.0:User":
                     if not v["aliases"]:
-                        logger.info("aliases: []")
+                        scim_table.add_row("aliases", "[]")
                     else:
-                        logger.info("aliases:")
-                        for l in v["aliases"]:
-                            for k1, v1 in l.items():
-                                logger.info(f" - {k1}: {v1}")
+                        aliases_str = ""
+                        for alias in v["aliases"]:
+                            for k1, v1 in alias.items():
+                                aliases_str += f"{k1}: {v1}\n"
+                        scim_table.add_row("aliases", aliases_str.strip())
                 else:
-                    logger.info(f"{k}: {v}")
-            logger.info("--------------------------------------------------------")
+                    scim_table.add_row(k, str(v))
+            
+            console.print(scim_table)
 
-        logger.info("\n")
         with open(f"{target_user['nickname']}.txt", "w", encoding="utf-8") as f:
             f.write(f'API 360 attributes for user with id: {target_user["id"]}\n')
             f.write("--------------------------------------------------------\n")
@@ -1348,6 +1708,7 @@ def show_user_attributes(settings: "SettingParams"):
                     else:
                         f.write(f"{k}: {v}\n")
                 f.write("--------------------------------------------------------\n")
+        console.print(f"[green]✅ User attributes saved to file: {target_user['nickname']}.txt[/green]")
         logger.info(f"User attributes saved to file: {target_user['nickname']}.txt")
     return
 
@@ -1395,9 +1756,21 @@ def save_group_data_prompt(settings: "SettingParams"):
     users = []
     user_id_to_nickname = {}
 
+    console.print(Panel(
+        "[bold blue]Group Data Viewer[/bold blue]\n"
+        "Enter group identifier in one of these formats:\n"
+        "• [cyan]alias[/cyan] - Group alias\n"
+        "• [cyan]id[/cyan] - Group ID\n"
+        "• [cyan]uid[/cyan] - Group UID",
+        title="[green]Group Information[/green]",
+        border_style="blue"
+    ))
+
     while True:
-        
-        answer = input("Enter group alias, id or uid to get mailing list permissions (empty string to exit): ")
+        answer = Prompt.ask(
+            "[bold yellow]Enter group alias, id or uid[/bold yellow]",
+            default=""
+        )
         if not answer.strip():
             break
         
@@ -1416,39 +1789,40 @@ def save_group_data_prompt(settings: "SettingParams"):
                 for user in users:
                     user_id_to_nickname[user['id']] = user.get('nickname', 'Unknown')
         
-        # Display group attributes in console
-        logger.info("\n")
-        logger.info("--------------------------------------------------------")
-        logger.info(f'Group attributes for group with id: {target_group["id"]}')
-        logger.info("--------------------------------------------------------")
+        # Display group attributes in console using Rich table
+        group_table = Table(title=f"Group attributes for group with id: {target_group['id']}")
+        group_table.add_column("Attribute", style="cyan")
+        group_table.add_column("Value", style="green")
         
         for k, v in target_group.items():
             if k.lower() == "aliases":
-                logger.info("Aliases:")
-                for alias_item in v:
-                    logger.info(f" - {alias_item}")
+                if v:
+                    aliases_str = "\n".join(v)
+                    group_table.add_row("Aliases", aliases_str)
+                else:
+                    group_table.add_row("Aliases", "[]")
             elif k.lower() == "members":
-                logger.info("Members:")
+                members_str = ""
                 for member in v:
                     member_id = member.get('id', '')
                     member_type = member.get('type', '')
                     if member_type == 'group':
                         group_name = group_id_to_name.get(str(member_id), 'Unknown')
-                        logger.info(f" - type: {member_type}, id: {member_id} ({group_name})")
+                        members_str += f"Type: {member_type}, ID: {member_id} ({group_name})\n"
                     else:
                         nickname = user_id_to_nickname.get(member_id, 'Unknown')
-                        logger.info(f" - type: {member_type}, id: {member_id} ({nickname})")
+                        members_str += f"Type: {member_type}, ID: {member_id} ({nickname})\n"
+                group_table.add_row("Members", members_str.strip() if members_str else "No members")
             elif k.lower() == "memberof":
-                logger.info("Member of:")
+                memberof_str = ""
                 for member_of in v:
-                    # member_of should be a group ID, find the group name
                     group_name = group_id_to_name.get(str(member_of), 'Unknown')
-                    logger.info(f" - {member_of} ({group_name})")
+                    memberof_str += f"{member_of} ({group_name})\n"
+                group_table.add_row("Member of", memberof_str.strip() if memberof_str else "Not a member of any group")
             else:
-                logger.info(f"{k}: {v}")
+                group_table.add_row(k, str(v))
         
-        logger.info("--------------------------------------------------------")
-        logger.info("\n")
+        console.print(group_table)
         
         # Save to file
         filename = f"group_{target_group['id']}.txt"
@@ -1483,16 +1857,27 @@ def save_group_data_prompt(settings: "SettingParams"):
             
             f.write("--------------------------------------------------------\n")
         
-        logger.info(f"Group attributes saved to file: {filename}")
+        console.print(f"[green]✅ Group attributes saved to file: {filename}[/green]")
     return
 
 def show_mailing_list_permissions(settings: "SettingParams", input_group = {}):
     users = []
     user_id_to_nickname = {}
     user_id_to_name = {}
+    if not input_group:
+        console.print(Panel(
+            "[bold blue]Mailing List Permissions Viewer[/bold blue]\n"
+            "Enter group identifier to view send permissions",
+            title="[green]Group Permissions[/green]",
+            border_style="blue"
+        ))
+    
     while True:
         if not input_group:
-            answer = input("Enter group alias, id or uid to get mailing list permissions (empty string to exit): ")
+            answer = Prompt.ask(
+                "[bold yellow]Enter group alias, id or uid to get mailing list permissions[/bold yellow]",
+                default=""
+            )
             if not answer.strip():
                 break
         else:
@@ -1510,8 +1895,6 @@ def show_mailing_list_permissions(settings: "SettingParams", input_group = {}):
                 user_id_to_nickname[user['id']] = user.get('nickname', 'Unknown')
                 name = user.get('name', {})
                 user_id_to_name[user['id']] = f"{name.get('last', '')} {name.get('first', '')} {name.get('middle', '')}" 
-
-
         
         # Get mailing list permissions
         permissions = get_mailing_list_permissions(settings, target_group['emailId'])
@@ -1536,22 +1919,33 @@ def show_mailing_list_permissions(settings: "SettingParams", input_group = {}):
         for shared_mailbox in shared_mailboxes:
             shared_mailboxes_dict[shared_mailbox['id']] = shared_mailbox           
         
-        # Display results in the specified format
+        # Display results using Rich components
         group_name = target_group.get('name', 'Unknown')
         group_id = target_group['id']
         group_email = target_group.get('email', 'Unknown')
         
-        logger.info("\n")
-        logger.info("--------------------------------------------------------")
-        logger.info(f'Group attributes for group with id: {target_group["id"]}')
-        logger.info("--------------------------------------------------------")
-        logger.info(f"name: {group_name}")
-        logger.info(f"id: {group_id}")
-        logger.info(f"email: {group_email}")
-        logger.info(f"emailId: {target_group.get('emailId', 'Unknown')}")
-        logger.info("Approved senders:")
+        # Create group info table
+        group_info_table = Table(show_header=False, box=box.SIMPLE)
+        group_info_table.add_column("Attribute", style="cyan")
+        group_info_table.add_column("Value", style="green")
+        group_info_table.add_row("Name:", group_name)
+        group_info_table.add_row("ID:", str(group_id))
+        group_info_table.add_row("Email:", group_email)
+        group_info_table.add_row("EmailId:", str(target_group.get('emailId', 'Unknown')))
         
-        # Display subjects from API response
+        group_panel = Panel(
+            group_info_table,
+            title="[bold blue]Group Information[/bold blue]",
+            border_style="blue"
+        )
+        console.print(group_panel)
+        
+        # Create approved senders table
+        senders_table = Table(title="Approved Senders")
+        senders_table.add_column("Type", style="cyan")
+        senders_table.add_column("ID", style="yellow")
+        senders_table.add_column("Details", style="green")
+        
         count_senders = 0
         if 'grants' in permissions and 'items' in permissions['grants']:
             for item in permissions['grants']['items']:
@@ -1560,27 +1954,32 @@ def show_mailing_list_permissions(settings: "SettingParams", input_group = {}):
                     subject = item['subject']
                     subject_type = subject.get('type', 'unknown')
                     subject_id = subject.get('id', 'null')
+                    
                     if subject_type == 'user':
                         subject_org = subject.get('org_id', 'unknown')
                         if str(subject_org) == str(settings.org_id):
                             nickname = user_id_to_nickname.get(str(subject_id), 'Unknown')
-                            logger.info(f" - type: {subject_type}, id: {subject_id}, org_id: {subject.get('org_id', '')}, nickname: {nickname}, name: {user_id_to_name.get(str(subject_id), '')}")
+                            name = user_id_to_name.get(str(subject_id), '')
+                            senders_table.add_row(subject_type, str(subject_id), f"Nickname: {nickname}, Name: {name}")
                     elif subject_type == 'anonymous':
-                        logger.info(f" - type: {subject_type}")
+                        senders_table.add_row(subject_type, "N/A", "Anyone can send")
                     elif subject_type == 'organization':
-                        logger.info(f" - type: {subject_type}, org_id: {subject.get('org_id', '')}")
+                        senders_table.add_row(subject_type, str(subject.get('org_id', '')), "Organization members")
                     elif subject_type == 'shared_mailbox':
                         name = shared_mailboxes_dict.get(str(subject_id), {}).get('name', 'Unknown')
                         email = shared_mailboxes_dict.get(str(subject_id), {}).get('email', 'Unknown')
-                        logger.info(f" - type: {subject_type}, id: {subject_id}, org_id: {subject.get('org_id', '')}, name: {name}, email: {email}")
+                        senders_table.add_row(subject_type, str(subject_id), f"Name: {name}, Email: {email}")
                     else:
-                        logger.info(f" - type: {subject_type}, org_id: {subject.get('org_id', '')}, id: {subject.get('id', '')}")
+                        senders_table.add_row(subject_type, str(subject.get('id', '')), f"Org: {subject.get('org_id', '')}")
+        
         if count_senders == 0:
-            logger.info(" - No permission subjects found.")
-            logger.info("--------------------------------------------------------")
-            logger.info("!!! WARNING !!! - NOBODY can send mail to this group.")
-        logger.info("--------------------------------------------------------")
-        logger.info("\n")
+            console.print("[bold red]⚠️  WARNING: NOBODY can send mail to this group![/bold red]")
+            senders_table.add_row("None", "N/A", "No permission subjects found")
+        
+        console.print(senders_table)
+        
+        # if not input_group:
+        #     console.input("[dim]Press Enter to continue...[/dim]")
 
         if input_group:
             break
@@ -1624,6 +2023,7 @@ def download_users_attrib_to_file(settings: "SettingParams"):
     scim_users = get_all_scim_users(settings)  
     if not users:
         logger.error("No users found from API 360 calls.")
+        console.input("[dim]Press Enter to continue...[/dim]")
         return
     else:
         with open('api_users.csv', 'w', encoding='utf-8', newline='') as csv_file:
@@ -1637,6 +2037,7 @@ def download_users_attrib_to_file(settings: "SettingParams"):
             logger.info(f"Saved {len(users)} API users to api_users.csv")
     if not scim_users:
         logger.error("No users found from SCIM calls.")
+        console.input("[dim]Press Enter to continue...[/dim]")
         return
     else:
         with open('scim_users.csv', 'w', encoding='utf-8', newline='') as csv_file:
@@ -1647,25 +2048,29 @@ def download_users_attrib_to_file(settings: "SettingParams"):
                 writer.writerow(user)
             logger.info(f"Saved {len(scim_users)} SCIM users to scim_users.csv")
 
+    console.input("[dim]Press Enter to continue...[/dim]")
+
 def default_email_create_file(settings: "SettingParams"):
     users = get_all_api360_users(settings)
     if not users:
         logger.error("No users found from API 360 calls.")
+        console.input("[dim]Press Enter to continue...[/dim]")
         return
     else:
         email_dict = {}
         nickname_dict = {}
-        logger.info(f"Downloading default emails for {len(users)} users...")
-        count = 0
-        total = len(users)
-        for user in users:
-            if user["id"].startswith("113"):
-                default_email_json = get_default_email(settings, user["id"])
-                count += 1
-                if divmod(count, 50)[1] == 0:
-                    logger.info(f"Got default email for {count} of {total} users.")
-                email_dict[user["id"]] = default_email_json
-                nickname_dict[user["id"]] = user["nickname"]
+        with console.status(f"[bold green]Downloading default emails for {len(users)} users...", spinner="dots"):
+        #logger.info(f"Downloading default emails for {len(users)} users...")
+            count = 0
+            total = len(users)
+            for user in users:
+                if user["id"].startswith("113"):
+                    default_email_json = get_default_email(settings, user["id"])
+                    count += 1
+                    if divmod(count, 50)[1] == 0:
+                        logger.info(f"Got default email for {count} of {total} users.")
+                    email_dict[user["id"]] = default_email_json
+                    nickname_dict[user["id"]] = user["nickname"]
 
         with open(settings.default_email_output_file, "w", encoding="utf-8") as f:
             f.write("nickname;new_DefaultEmail;new_DisplayName;old_DefaultEmail;old_DisplayName;uid\n")
@@ -1674,6 +2079,7 @@ def default_email_create_file(settings: "SettingParams"):
                 if email_data:
                     f.write(f"{nickname_dict[key]};{email_data['defaultFrom']};{email_data['fromName']};{email_data['defaultFrom']};{email_data['fromName']};{key}\n")
             logger.info(f"Default emails downloaded to {settings.default_email_output_file} file.")
+            console.input("[dim]Press Enter to continue...[/dim]")
 
 def default_email_update_from_file(settings: "SettingParams"):
     all_users = []
@@ -1695,9 +2101,10 @@ def default_email_update_from_file(settings: "SettingParams"):
         exit_flag = True
 
     if exit_flag:
+        console.input("[dim]Press Enter to continue...[/dim]")
         return
 
-    if "@" in all_users[0]:
+    if "@" in all_users[0] and ";" not in all_users[0]:
         logger.info("Input file contains single column. Use it as target default email for all users.")
         only_email = True
     else:
@@ -1717,6 +2124,7 @@ def default_email_update_from_file(settings: "SettingParams"):
             exit_flag = True
         
     if exit_flag:
+        console.input("[dim]Press Enter to continue...[/dim]")
         return
 
     exit_flag = False
@@ -1775,19 +2183,23 @@ def default_email_update_from_file(settings: "SettingParams"):
 
     if exit_flag:
         logger.error("There are must be column 'nickname' in input file ('default_email_data.csv').")
+        console.input("[dim]Press Enter to continue...[/dim]")
         return
     
     if not normalized_users:
         logger.info("List of modified users is empty. File must contains column 'nickname' and actual data in 'new_DefaultEmail' or 'new_DisplayName' columns.")
+        console.input("[dim]Press Enter to continue...[/dim]")
         return
     
-    answer = input(f"Modify personal email data for {len(normalized_users)} users? (Y/n): ")
-    if answer.upper() not in ["Y", "YES"]:
+    if not Confirm.ask(f"[bold yellow]Modify personal email data for {len(normalized_users)} users?[/bold yellow]"):
+        console.print("[yellow]Operation cancelled.[/yellow]")
+        console.input("[dim]Press Enter to continue...[/dim]")
         return
     
     api_users = get_all_api360_users(settings)
     if not api_users:
         logger.error("No users found from API 360 calls.")
+        console.input("[dim]Press Enter to continue...[/dim]")
         return
     
     url = f"{DEFAULT_360_API_URL}/admin/v1/org/{settings.org_id}/mail/users" 
@@ -1856,25 +2268,46 @@ def default_email_update_from_file(settings: "SettingParams"):
         except Exception as e:
             logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
 
+    console.input("[dim]Press Enter to continue...[/dim]")
+
 def send_perm_set_target_group(settings: "SettingParams"):
+    console.print(Panel(
+        "[bold blue]Set Target Group[/bold blue]\n"
+        "Select a group to manage send permissions for",
+        title="[green]Target Group Selection[/green]",
+        border_style="blue"
+    ))
+    
     while True:
-        answer = input("Enter group alias, id or uid to get mailing list permissions (empty string to exit): ")
+        answer = Prompt.ask(
+            "[bold yellow]Enter group alias, id or uid[/bold yellow]",
+            default=""
+        )
         if not answer.strip():
             break
         
         target_group, groups = get_target_group_data_prompt(settings, answer)
+        
         if not target_group:
             continue
         elif str(target_group["emailId"]) == "0":
-            logger.error(f"Group with alias {answer} is not mail enabled. Exiting.")
+            console.print(f"[bold red]❌ Group with alias {answer} is not mail enabled.[/bold red]")
             settings.target_group = {}
+            console.input("[dim]Press Enter to continue...[/dim]")
             continue
         else:
-            logger.info(f"Target group set: {target_group['name']} ({target_group['id']}, {target_group['emailId']})")
+            console.print(f"[bold green]✅ Target group set: {target_group['name']} ({target_group['id']}, {target_group['emailId']})[/bold green]")
+            console.input("[dim]Press Enter to continue...[/dim]")
             break
     return
 
 def send_perm_add_users_to_allow_list_prompt(settings: "SettingParams"):
+
+    if not settings.target_group:
+        logger.error("No target group set. Exiting.")
+        console.input("[dim]Press Enter to continue...[/dim]")
+        return
+    
     while True:
 
         break_flag, double_users_flag, users_to_add = find_users_prompt(settings)
@@ -1890,9 +2323,18 @@ def send_perm_add_users_to_allow_list_prompt(settings: "SettingParams"):
 
         if send_perm_call_api(settings, users_to_add, "ADD_USER", []):
             show_mailing_list_permissions(settings, settings.target_group)
+            console.input("[dim]Press Enter to continue...[/dim]")
             break
 
+        
+
 def send_perm_remove_users_from_allow_list(settings: "SettingParams"):
+
+    if not settings.target_group:
+        logger.error("No target group set. Exiting.")
+        console.input("[dim]Press Enter to continue...[/dim]")
+        return
+    
     while True:
         break_flag, double_users_flag, users_to_remove = find_users_prompt(settings)
         if break_flag:
@@ -1907,26 +2349,24 @@ def send_perm_remove_users_from_allow_list(settings: "SettingParams"):
 
         if send_perm_call_api(settings, users_to_remove, "REMOVE_USER", []):
             show_mailing_list_permissions(settings, settings.target_group)
+            console.input("[dim]Press Enter to continue...[/dim]")
             break
         
 def send_perm_grand_all_users(settings: "SettingParams"):
 
     if not settings.target_group:
-        logger.info("No target group set. Exiting.")
+        logger.error("No target group set. Exiting.")
+        console.input("[dim]Press Enter to continue...[/dim]")
         return
     
     show_mailing_list_permissions(settings, settings.target_group)
 
-    answer = input("Need confirmation for setting grand all permission (yes/no): ").strip().lower()
-    while answer not in ["yes", "no"]:
-        logger.warning("Enter 'yes' или 'no'")
-        answer = input("Need confirmation for setting grand all permission (yes/no): ").strip().lower()
-
-    if answer == "yes":
+    if Confirm.ask("[bold yellow]⚠️  Need confirmation for setting grand all permission?[/bold yellow]"):
         if send_perm_call_api(settings, None, "SET_DEFAULT", []):
             show_mailing_list_permissions(settings, settings.target_group)
+            console.input("[dim]Press Enter to continue...[/dim]")
     else:
-        logger.info("Execution canceled.")
+        console.print("[red]❌ Execution canceled.[/red]")
 
     return
 
@@ -1958,7 +2398,8 @@ def get_shared_mailbox_detail(settings: "SettingParams"):
 def send_perm_shared_mailbox(settings: "SettingParams"):
 
     if not settings.target_group:
-        logger.info("No target group set. Exiting.")
+        logger.error("No target group set. Exiting.")
+        console.input("[dim]Press Enter to continue...[/dim]")
         return
     
     shared_mailboxes = get_all_shared_mailboxes(settings)
@@ -1969,8 +2410,22 @@ def send_perm_shared_mailbox(settings: "SettingParams"):
     while True:
 
         show_mailing_list_permissions(settings, settings.target_group)
-        logger.info("To add shared mailbox to list, type +email_of_shared_mailbox, to remove from list, type -email_of_shared_mailbox.")
-        answer = input("Enter shared mailboxes emails, aliases or part of name (with + or -), separated by comma or space (empty string to exit): ")
+        console.print(Panel(
+        "[bold blue]Add shared mailbox to group send permissions[/bold blue]\n"
+        "Enter target shared mailboxes emails, aliases or part of name in one of these formats (with + or -), separated by comma or space:\n"
+        "• [cyan]<alias>[/cyan] - shared mailbox alias\n"
+        "• [cyan]<email>[/cyan] - shared mailbox email\n"
+        "• [cyan]<NAME>[/cyan] - part of shared mailbox name\n",
+        title="[green]Shared mailbox adding[/green]",
+        border_style="blue"
+        ))
+    
+        answer = Prompt.ask(
+            "[bold yellow]Enter shared mailbox[/bold yellow]",
+            default=""
+        )
+        # logger.info("To add shared mailbox to list, type +email_of_shared_mailbox, to remove from list, type -email_of_shared_mailbox.")
+        # answer = input("Enter shared mailboxes emails, aliases or part of name (with + or -), separated by comma or space (empty string to exit): ")
         if not answer.strip():
             break
 
@@ -2047,7 +2502,6 @@ def send_perm_shared_mailbox(settings: "SettingParams"):
     
     return
 
-
 def send_perm_call_api(settings: "SettingParams", users_to_change, mode, shared_mailboxes):
     url = f"{DEFAULT_360_API_URL_V2}/{settings.org_id}/mail-lists/{settings.target_group['emailId']}/update-permissions"
     headers = {
@@ -2061,7 +2515,8 @@ def send_perm_call_api(settings: "SettingParams", users_to_change, mode, shared_
     #проверяем, что в группе нет разрешения на anonymous, иначе удаляем его
     permissions = get_mailing_list_permissions(settings, settings.target_group['emailId'])
     if permissions is None:
-            logger.error(f"Failed to get mailing list permissions for group {settings.target_group['name']}")
+            logger.error(f"Failed to get mailing list permissions for group {settings.target_group['name']}. Exiting.")
+            return return_value
 
     if mode.startswith("ADD"):
         if 'grants' in permissions and 'items' in permissions['grants']:
@@ -2289,35 +2744,66 @@ def forward_rules_get_for_user(settings: "SettingParams"):
         for user in users_to_add:
             forward_rules_show_for_user(settings, user)
             
-
 def forward_rules_show_for_user(settings: "SettingParams", user):
-    response_json = get_forward_rules_from_api(settings, user)
+    with console.status(f"[bold green]Getting forward rules for user {user['nickname']}...", spinner="dots"):
+        response_json = get_forward_rules_from_api(settings, user)
 
-    logger.info("\n")
-    logger.info("--------------------------------------------------------")
-    logger.info(f'Forward rules for user: {user["id"]}')
-    logger.info("--------------------------------------------------------")
-    logger.info(f"name: {user['name']['last']} {user['name']['first']} {user['name']['middle']}")
-    logger.info(f"nickname: {user['nickname']}")
-    if 'aliases' in user:
-        logger.info("aliases:")
-        for alias in user['aliases']:
-            logger.info(f" - {alias}")
-    logger.info(f"position: {user['position']}")
-    logger.info("Forward rules:")
-    if response_json["forwards"]:   
-        for forward in response_json["forwards"]:   
-            logger.info(f" - address: {forward['address']}, save in mailbox: {forward['withStore']}")
+    # Create user info table
+    user_table = Table(show_header=False, box=box.SIMPLE)
+    user_table.add_column("Attribute", style="cyan")
+    user_table.add_column("Value", style="green")
+    
+    full_name = f"{user['name']['last']} {user['name']['first']} {user['name']['middle']}"
+    user_table.add_row("Name:", full_name)
+    user_table.add_row("Nickname:", user['nickname'])
+    user_table.add_row("User ID:", user['id'])
+    user_table.add_row("Position:", user.get('position', 'N/A'))
+    
+    if 'aliases' in user and user['aliases']:
+        aliases_str = ", ".join(user['aliases'])
+        user_table.add_row("Aliases:", aliases_str)
+    
+    user_panel = Panel(
+        user_table,
+        title="[bold blue]User Information[/bold blue]",
+        border_style="blue"
+    )
+    
+    # Create forward rules table
+    forward_table = Table(title="Forward Rules")
+    forward_table.add_column("Address", style="green")
+    forward_table.add_column("Save in Mailbox", style="cyan")
+    forward_table.add_column("Rule Name", style="yellow")
+    
+    if response_json["forwards"]:
+        for forward in response_json["forwards"]:
+            save_status = "✅ Yes" if forward['withStore'] else "❌ No"
+            forward_table.add_row(
+                forward['address'],
+                save_status,
+                forward.get('ruleName', 'N/A')
+            )
     else:
-        logger.info(" - No forward rules found.")
-    logger.info("Autoreplies rules:")
-    if response_json["autoreplies"]:   
-        for autoreply in response_json["autoreplies"]:   
-            logger.info(f" - text: {autoreply['text']}")
+        forward_table.add_row("No forward rules found", "N/A", "N/A")
+    
+    # Create autoreplies table
+    autoreply_table = Table(title="Autoreply Rules")
+    autoreply_table.add_column("Text", style="green")
+    autoreply_table.add_column("Rule ID", style="yellow")
+    
+    if response_json["autoreplies"]:
+        for autoreply in response_json["autoreplies"]:
+            autoreply_table.add_row(
+                autoreply['text'][:50] + "..." if len(autoreply['text']) > 50 else autoreply['text'],
+                str(autoreply.get('ruleId', 'N/A'))
+            )
     else:
-        logger.info(" - No autoreplays rules found.")
-    logger.info("--------------------------------------------------------")
-    logger.info("\n")
+        autoreply_table.add_row("No autoreply rules found", "N/A")
+    
+    console.print(user_panel)
+    console.print(forward_table)
+    console.print(autoreply_table)
+    console.input("[dim]Press Enter to continue...[/dim]")
 
 def forward_rules_clear_for_user(settings: "SettingParams"):
     logger.info("Clear forward and autoreply rules for users.")
@@ -2341,7 +2827,10 @@ def find_users_prompt(settings: "SettingParams"):
     break_flag = False
     double_users_flag = False
 
-    answer = input("Enter users aliases or uid or last name, separated by comma or space (empty string to exit): ")
+    answer = Prompt.ask(
+        "[bold yellow]Enter users aliases or uid or last name, separated by comma or space[/bold yellow]",
+        default=""
+    )
     if not answer.strip():
         break_flag = True
 
@@ -2372,7 +2861,8 @@ def find_users_prompt(settings: "SettingParams"):
         else:
             found_last_name_user = []
             for user in users:
-                if user["nickname"] == searched.lower().strip() or searched.lower().strip() in user["aliases"]:
+                aliases_lower_case = [r.lower() for r in user["aliases"]]
+                if user["nickname"].lower() == searched.lower().strip() or searched.lower().strip() in aliases_lower_case:
                     logger.debug(f"User found: {user['nickname']} ({user['id']})")
                     users_to_add.append(user)
                     found_flag = True
@@ -2396,7 +2886,6 @@ def find_users_prompt(settings: "SettingParams"):
             logger.error(f"User {searched} not found in Y360 organization.")
 
     return break_flag, double_users_flag, users_to_add
-
 
 def get_forward_rules_from_api(settings: "SettingParams", user):
     logger.debug(f"Getting forward rule for user {user["id"]} ({user["nickname"]})...")
@@ -2455,11 +2944,11 @@ def clear_forward_rule_by_api(settings: "SettingParams", user, ruleId):
     url = f"{DEFAULT_360_API_URL}/admin/v1/org/{settings.org_id}/mail/users/{user["id"]}/settings/user_rules/{ruleId}"
     headers = {"Authorization": f"OAuth {settings.oauth_token}"}
     logger.info(f"Clearing forward rule {ruleId} for user {user["id"]} ({user["nickname"]})...")
-
+    logger.debug(f"DELETE URL: {url}")
     try:
         retries = 1
         while True:
-            logger.debug(f"DELETE URL: {url}")
+            
             response = requests.delete(url, headers=headers)
             logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
             if response.status_code != HTTPStatus.OK.value:
@@ -2477,11 +2966,12 @@ def clear_forward_rule_by_api(settings: "SettingParams", user, ruleId):
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
         return
 
-def forward_rules_dowanload_for_all_users(settings: "SettingParams"):
+def forward_rules_download_for_all_users(settings: "SettingParams"):
     logger.info("Get forward rules for all users.")
     users = get_all_api360_users(settings)
     if not users:
         logger.info("No users found in Y360 organization.")
+        console.input("[dim]Press Enter to continue...[/dim]")
         return
 
     rules = []
@@ -2489,23 +2979,24 @@ def forward_rules_dowanload_for_all_users(settings: "SettingParams"):
     autoreply_dict = {}
     count = 0
     logger.info(f"Total users count - {len(users)}.")
-    for user in users:
-        if user["id"].startswith("113"):
-            count += 1
-            if count % 10 == 0:
-                logger.info(f"Processed {count} users (total users count - {len(users)}).")
-            response_json = get_forward_rules_from_api(settings, user) 
-            if response_json:   
-                if response_json["forwards"]:
-                    rules = []
-                    for forward in response_json["forwards"]:
-                        rules.append(forward)
-                    forward_dict[user["id"]] = rules
-                if response_json["autoreplies"]:
-                    rules = []
-                    for autoreply in response_json["autoreplies"]:
-                        rules.append(autoreply)
-                    autoreply_dict[user["id"]] = rules
+    with console.status("[bold green]Getting forward rules for all users from API...", spinner="dots"):
+        for user in users:
+            if user["id"].startswith("113"):
+                count += 1
+                if count % 10 == 0:
+                    logger.info(f"Processed {count} users (total users count - {len(users)}).")
+                response_json = get_forward_rules_from_api(settings, user) 
+                if response_json:   
+                    if response_json["forwards"]:
+                        rules = []
+                        for forward in response_json["forwards"]:
+                            rules.append(forward)
+                        forward_dict[user["id"]] = rules
+                    if response_json["autoreplies"]:
+                        rules = []
+                        for autoreply in response_json["autoreplies"]:
+                            rules.append(autoreply)
+                        autoreply_dict[user["id"]] = rules
 
     with open(settings.forward_rules_output_file, "w", encoding="utf-8") as f:
         f.write("uid;nickname;displayName;isEnabled;forwardRules;Autoreplays\n")
@@ -2518,35 +3009,547 @@ def forward_rules_dowanload_for_all_users(settings: "SettingParams"):
                 autorepaly_rules_string = "#".join([f"{rule['text']}" for rule in autoreply_dict[user["id"]]])
             f.write(f"{user['id']};{user['nickname']};{user['name']['last']} {user['name']['first']} {user['name']['middle']};{user["isEnabled"]};{forward_rules_string};{autorepaly_rules_string}\n")
         logger.info(f"{len(users)} users downloaded to file {settings.forward_rules_output_file}")
+        console.input("[dim]Press Enter to continue...[/dim]")
+
+def mfa_download_settings(settings):
+    logger.info("Get 2FA settings for all users.")
+    users = get_all_api360_users(settings)
+    if not users:
+        logger.info("No users found in Y360 organization.")
+        return
+
+    mfa = []
+    count = 0
+    logger.info(f"Total users count - {len(users)}.")
+    with console.status("[bold green]Getting 2FA settings for all users from API...", spinner="dots"):
+        for user in users:
+            user_mfa = {}
+            if user["id"].startswith("113"):
+                user_mfa["id"] = user["id"]
+                user_mfa["nickname"] = user["nickname"]
+                user_mfa["displayName"] = user["name"]["last"] + " " + user["name"]["first"] + " " + user["name"]["middle"]
+                user_mfa["isEnabled"] = user["isEnabled"]
+                user_mfa["isAdmin"] = user["isAdmin"]
+                count += 1
+                if count % 10 == 0:
+                    logger.info(f"Processed {count} users (total users count - {len(users)}).")
+                mfa_dict = get_2fa_settings_from_api(settings, user) 
+
+                if mfa_dict["personal_and_phone"]:
+                    user_mfa["personal2FAEnabled"] = mfa_dict["personal_and_phone"]["has2fa"]
+                    user_mfa["hasSecurityPhone"] = mfa_dict["personal_and_phone"]["hasSecurityPhone"]
+                else:
+                    user_mfa["personal2FAEnabled"] = ""
+                    user_mfa["hasSecurityPhone"] = ""
+
+                if mfa_dict["per_user_2fa"]:
+                    user_mfa["domain2FAEnabled"] = mfa_dict["per_user_2fa"]["is2faEnabled"]
+                else:
+                    user_mfa["domain2FAEnabled"] = ""
+
+                if mfa_dict["domain_2fa"]:
+                    user_mfa["global2FAEnabled"] = mfa_dict["domain_2fa"]["enabled"]
+                    user_mfa["global2FADuration"] = mfa_dict["domain_2fa"]["duration"]
+                    user_mfa["global2FAPolicy"] = mfa_dict["domain_2fa"]["scope"]
+                else:
+                    user_mfa["global2FAEnabled"] = ""
+                    user_mfa["global2FADuration"] = ""
+                    user_mfa["global2FAPolicy"] = ""
+
+                mfa.append(user_mfa)
+
+    with open(settings.users_2fa_output_file, "w", encoding="utf-8") as f:
+        f.write("uid;nickname;displayName;isEnabled;isAdmin;domain2FAEnabled;hasSecurityPhone;personal2FAEnabled;global2FAEnabled;global2FADuration;global2FAPolicy\n")
+        for user in mfa:
+            f.write(f"{user['id']};{user['nickname']};{user['displayName']};{user['isEnabled']};{user['isAdmin']};{user['domain2FAEnabled']};{user['hasSecurityPhone']};{user['personal2FAEnabled']};{user['global2FAEnabled']};{user['global2FADuration']};{user['global2FAPolicy']}\n")
+        logger.info(f"{len(users)} users downloaded to file {settings.users_2fa_output_file}")
+        console.input("[dim]Press Enter to continue...[/dim]")
+
+def get_2fa_settings_from_api(settings: "SettingParams", user):
+    logger.debug(f"Getting 2fa settings for user {user["id"]} ({user["nickname"]})...")
+
+    url_personal_and_phone = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users/{user["id"]}/2fa"
+    url_enable_per_user_2fa = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users/{user["id"]}/domain_2fa"
+    url_domain_2fa = f"{DEFAULT_360_API_URL}/security/v2/org/{settings.org_id}/domain_2fa"
+
+    headers = {"Authorization": f"OAuth {settings.oauth_token}"}
+    output = {}
+    data = {}
+    try:
+        retries = 1
+        while True:
+            logger.debug(f"GET url - {url_personal_and_phone}")
+            response = requests.get(url_personal_and_phone, headers=headers)
+            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            if response.status_code != HTTPStatus.OK.value:
+                logger.error(f"Error during GET request for user {user["id"]}: {response.status_code}. Error message: {response.text}")
+                if retries < MAX_RETRIES:
+                    logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
+                    time.sleep(RETRIES_DELAY_SEC * retries)
+                    retries += 1
+                else:
+                    logger.error(f"Error. Getting personal and phone 2fa settings for user {user["id"]} ({user["nickname"]}) failed.")
+                    break
+            else:
+                data = response.json()
+                break
+    except requests.exceptions.RequestException as e:
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+    
+    output["personal_and_phone"] = data
+
+    data = {}
+    try:
+        retries = 1
+        while True:
+            logger.debug(f"GET url - {url_enable_per_user_2fa}")
+            response = requests.get(url_enable_per_user_2fa, headers=headers)
+            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            if response.status_code != HTTPStatus.OK.value:
+                logger.error(f"Error during GET request for user {user["id"]}: {response.status_code}. Error message: {response.text}")
+                if retries < MAX_RETRIES:
+                    logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
+                    time.sleep(RETRIES_DELAY_SEC * retries)
+                    retries += 1
+                else:
+                    logger.error(f"Error. Getting per user 2fa settings for user {user["id"]} ({user["nickname"]}) failed.")
+                    break
+            else:
+                data = response.json()
+                break
+    except requests.exceptions.RequestException as e:
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+    
+    output["per_user_2fa"] = data
+
+    data = {}
+    try:
+        retries = 1
+        while True:
+            logger.debug(f"GET url - {url_domain_2fa}")
+            response = requests.get(url_domain_2fa, headers=headers)
+            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            if response.status_code != HTTPStatus.OK.value:
+                logger.error(f"Error during GET request for user {user["id"]}: {response.status_code}. Error message: {response.text}")
+                if retries < MAX_RETRIES:
+                    logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
+                    time.sleep(RETRIES_DELAY_SEC * retries)
+                    retries += 1
+                else:
+                    logger.error(f"Error. Getting domain 2fa settings for user {user["id"]} ({user["nickname"]}) failed.")
+                    break
+            else:
+                data = response.json()
+                break
+    except requests.exceptions.RequestException as e:
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+    
+    output["domain_2fa"] = data
+
+    return output
+
+def mfa_prompt_settings_for_user(settings: "SettingParams"):
+    logger.info("Get 2FA settings for users.")
+    while True:
+        
+        break_flag, double_users_flag, users_to_add = find_users_prompt(settings)
+        if break_flag:
+            break
+        
+        if double_users_flag:
+            continue
+
+        if not users_to_add:
+            logger.info("No users to add. Exiting.")
+            continue
+
+        for user in users_to_add:
+            mfa_show_settings_for_user(settings, user)
+
+def mfa_show_settings_for_user(settings: "SettingParams", user: dict):
+    with console.status(f"[bold green]Getting 2FA settings for user {user['nickname']}...", spinner="dots"):
+        mfa_dict = get_2fa_settings_from_api(settings, user)
+
+    # Create user info table
+    user_table = Table(show_header=False, box=box.SIMPLE)
+    user_table.add_column("Attribute", style="cyan")
+    user_table.add_column("Value", style="green")
+    
+    full_name = f"{user['name']['last']} {user['name']['first']} {user['name']['middle']}"
+    user_table.add_row("Name:", full_name)
+    user_table.add_row("Nickname:", user['nickname'])
+    user_table.add_row("User ID:", user['id'])
+    user_table.add_row("Is Enabled:", "✅ Yes" if user['isEnabled'] else "❌ No")
+    user_table.add_row("Is Admin:", "✅ Yes" if user['isAdmin'] else "❌ No")
+    
+    if 'aliases' in user and user['aliases']:
+        aliases_str = ", ".join(user['aliases'])
+        user_table.add_row("Aliases:", aliases_str)
+    
+    user_panel = Panel(
+        user_table,
+        title="[bold blue]User Information[/bold blue]",
+        border_style="blue"
+    )
+    
+    # Create 2FA settings table
+    mfa_table = Table(show_header=False, box=box.SIMPLE)
+    mfa_table.add_column("Setting", style="cyan")
+    mfa_table.add_column("Status", style="green")
+    
+    has_phone = mfa_dict["personal_and_phone"].get("hasSecurityPhone", False)
+    mfa_table.add_row("Has security phone:", "✅ Yes" if has_phone else "❌ No")
+    
+    domain_2fa = mfa_dict["per_user_2fa"].get("is2faEnabled", False)
+    mfa_table.add_row("Domain 2FA enabled:", "✅ Yes" if domain_2fa else "❌ No")
+    
+    personal_2fa = mfa_dict["personal_and_phone"].get("has2fa", False)
+    mfa_table.add_row("Personal 2FA enabled:", "✅ Yes" if personal_2fa else "❌ No")
+    
+    global_2fa = mfa_dict["domain_2fa"].get("enabled", False)
+    mfa_table.add_row("Global 2FA enabled:", "✅ Yes" if global_2fa else "❌ No")
+    
+    duration = mfa_dict["domain_2fa"].get("duration", "Unknown")
+    mfa_table.add_row("Global 2FA duration:", str(duration))
+    
+    policy = mfa_dict["domain_2fa"].get("scope", "Unknown")
+    mfa_table.add_row("Global 2FA policy:", str(policy))
+    
+    mfa_panel = Panel(
+        mfa_table,
+        title="[bold green]2FA Settings[/bold green]",
+        border_style="green"
+    )
+    
+    console.print(user_panel)
+    console.print(mfa_panel)
+    console.input("[dim]Press Enter to continue...[/dim]")
+
+def mfa_reset_personal_phone_prompt(settings: "SettingParams"):
+    logger.info("Reset 2FA phone for users.")
+    while True:
+        
+        break_flag, double_users_flag, users_to_add = find_users_prompt(settings)
+        if break_flag:
+            break
+        
+        if double_users_flag:
+            continue
+
+        if not users_to_add:
+            logger.info("No users to add. Exiting.")
+            continue
+
+        for user in users_to_add:
+            logger.info(f"Check if {user["id"]} ({user["nickname"]}) has security phone.")
+            mfa = get_2fa_settings_from_api(settings, user)
+            if mfa["personal_and_phone"].get("hasSecurityPhone", False):
+                mfa_reset_personal_phone(settings, user)
+            else:
+                logger.info(f"{user["id"]} ({user["nickname"]}) has no security phone. Skipping.")
+        
+
+def mfa_reset_personal_phone(settings: "SettingParams", user: dict):
+    logger.info(f"Deleting security phone for user {user["id"]} ({user["nickname"]})")
+    try:
+        retries = 1
+        url = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users/{user["id"]}/2fa"
+        headers = {"Authorization": f"OAuth {settings.oauth_token}"}
+        logger.debug(f"DELETE URL: {url}")
+        while True:
+            response = requests.delete(url, headers=headers)
+            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            if response.status_code != HTTPStatus.OK.value:
+                logger.error(f"Error during DELETE request: {response.status_code}. Error message: {response.text}")
+                if retries < MAX_RETRIES:
+                    logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
+                    time.sleep(RETRIES_DELAY_SEC * retries)
+                    retries += 1
+                else:
+                    logger.error(f"Error. Deleting security phone for uid {user["id"]} ({user["nickname"]}) failed.")
+                    break
+            else:
+                logger.info(f"Success - Successfully deleted security phone for uid {user["id"]} ({user["nickname"]}).")
+                break
+    except Exception as e:
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+
+
+def mfa_logout_single_user_prompt(settings: "SettingParams"):
+    logger.info("Logout users from Yandex 360 services.")
+    while True:
+        
+        break_flag, double_users_flag, users_to_add = find_users_prompt(settings)
+        if break_flag:
+            break
+        
+        if double_users_flag:
+            continue
+
+        if not users_to_add:
+            logger.info("No users to add. Exiting.")
+            continue
+
+        if len(users_to_add) == 1:
+            if not Confirm.ask(f"[bold yellow]Do you want to logout {users_to_add[0]['id']} ({users_to_add[0]['nickname']}) from Yandex 360 services?[/bold yellow]"):
+                continue
+        else:
+            if not Confirm.ask(f"[bold yellow]Do you want to logout {len(users_to_add)} users from Yandex 360 services?[/bold yellow]"):
+                continue
+
+        for user in users_to_add:
+            mfa_logout_single_user(settings, user)
+
+def mfa_logout_single_user(settings: "SettingParams", user: dict):
+    logger.info(f"Logout user {user["id"]} ({user["nickname"]}) from Yandex 360 services.")
+    try:
+        retries = 1
+        url = f"{DEFAULT_360_API_URL}/security/v1/org/{settings.org_id}/domain_sessions/users/{user["id"]}/logout"
+        headers = {"Authorization": f"OAuth {settings.oauth_token}"}
+        logger.debug(f"PUT URL: {url}")
+        while True:
+            response = requests.put(url, headers=headers)
+            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            if response.status_code != HTTPStatus.OK.value:
+                logger.error(f"Error during PUT request: {response.status_code}. Error message: {response.text}")
+                if retries < MAX_RETRIES:
+                    logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
+                    time.sleep(RETRIES_DELAY_SEC * retries)
+                    retries += 1
+                else:
+                    logger.error(f"Error. Logout user {user["id"]} ({user["nickname"]}) failed.")
+                    break
+            else:
+                logger.info(f"Success - Successfully logout user uid {user["id"]} ({user["nickname"]}).")
+                break
+    except Exception as e:
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+
+def mfa_logout_users_from_file(settings: "SettingParams"):
+    logger.info(f"Logout users from Yandex 360 services from file {settings.users_2fa_input_file}.")
+    all_users = []
+    exit_flag = False
+    double_users_flag = False
+
+    try:
+        with open(settings.users_2fa_input_file, "r", encoding="utf-8") as f:
+            all_users = f.readlines()
+    except FileNotFoundError:
+        logger.error(f"Input file {settings.users_2fa_input_file} not found. Exiting.")
+        exit_flag = True
+    except Exception as e:
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+        exit_flag = True
+
+    if all_users == []:
+        logger.error(f"Input file {settings.users_2fa_input_file} is empty. Exiting.")
+        exit_flag = True
+
+    if exit_flag:
+        return
+    
+    pattern = r'[;,\s]+'
+    users_to_add = []
+    users = get_all_api360_users(settings)
+    if not users:
+        logger.info("No users found in Y360 organization.")
+        console.input("[dim]Press Enter to continue...[/dim]")
+        return
+
+    for line in all_users:
+        searched = re.split(pattern, line)[0].strip().lower()
+        if searched in ["id", "nickname", "displayname"]:
+            continue
+        if "@" in searched.strip():
+            searched = searched.split("@")[0]
+        found_flag = False
+        if all(char.isdigit() for char in searched.strip()):
+            if len(searched.strip()) == 16 and searched.strip().startswith("113"):
+                for user in users:
+                    if user["id"] == searched.strip():
+                        logger.debug(f"User found: {user['nickname']} ({user['id']})")
+                        users_to_add.append(user)
+                        found_flag = True
+                        break
+        else:
+            found_last_name_user = []
+            for user in users:
+                aliases_lower_case = [r.lower() for r in user["aliases"]]
+                if user["nickname"].lower() == searched.lower().strip() or searched.lower().strip() in aliases_lower_case:
+                    logger.debug(f"User found: {user['nickname']} ({user['id']})")
+                    users_to_add.append(user)
+                    found_flag = True
+                    break
+                if user["name"]["last"].lower() == searched.lower().strip():
+                    found_last_name_user.append(user)
+            if not found_flag and found_last_name_user:
+                if len(found_last_name_user) == 1:
+                    logger.debug(f"User found ({searched}): {found_last_name_user[0]['nickname']} ({found_last_name_user[0]['id']}, {found_last_name_user[0]['position']})")
+                    users_to_add.append(found_last_name_user[0])
+                    found_flag = True
+                else:
+                    logger.error(f"User {searched} found more than one user:")
+                    for user in found_last_name_user:
+                        logger.error(f" - last name {user['name']['last']}, nickname {user['nickname']} ({user['id']}, {user['position']})")
+                    logger.error("Refine your search parameters.")
+                    double_users_flag = True
+                    break
+
+        if not found_flag:
+            logger.error(f"User {searched} not found in Y360 organization.")
+
+    if len(users_to_add) == 0:
+        logger.error("No users from file {settings.users_2fa_input_file} found in Y360 organization.")
+        console.input("[dim]Press Enter to continue...[/dim]")
+        return
+
+    if len(users_to_add) == 1:
+            answer = input("Do you want to logout {user['id'] (user['nickname]) from Yandex 360 services? (yes/n): ")
+    else:
+        logger.info(f"Some users from file {settings.users_2fa_input_file} found in Y360 organization:")
+        if len(users_to_add) <= 3:
+            for user in users_to_add:
+                logger.info(f" - nickname - {user['nickname']}, id - {user['id']}, name - {user['name']['last']} {user['name']['first']} {users_to_add[0]['name']['middle']}")
+        else:
+            middle_index = len(users_to_add) // 2
+            logger.info(f" - nickname - {users_to_add[0]['nickname']}, id - {users_to_add[0]['id']}, name - {users_to_add[0]['name']['last']} {users_to_add[0]['name']['first']} {users_to_add[0]['name']['middle']}")
+            logger.info(" - ...")
+            logger.info(f" - nickname - {users_to_add[middle_index]['nickname']}, id - {users_to_add[middle_index]['id']}, name - {users_to_add[middle_index]['name']['last']} {users_to_add[middle_index]['name']['first']} {users_to_add[middle_index]['name']['middle']}")
+            logger.info(" - ...")
+            logger.info(f" - nickname - {users_to_add[-1]['nickname']}, id - {users_to_add[-1]['id']}, name - {users_to_add[-1]['name']['last']} {users_to_add[-1]['name']['first']} {users_to_add[-1]['name']['middle']}")
+
+    if len(users_to_add) == 1:
+        if not Confirm.ask(f"[bold yellow]Do you want to logout {users_to_add[0]['id']} ({users_to_add[0]['nickname']}) from Yandex 360 services?[/bold yellow]"):
+            return
+    else:
+        if not Confirm.ask(f"[bold yellow]Do you want to logout {len(users_to_add)} users from Yandex 360 services?[/bold yellow]"):
+            return
+
+    for user in users_to_add:
+        mfa_logout_single_user(settings, user)
+
+    console.input("[dim]Press Enter to continue...[/dim]")
+    return
+
+def mfa_logout_users_with_no_phone(settings: "SettingParams"):
+    logger.info("Logout users with 2FA set and no security phone configured from Yandex 360 services.")
+    logger.info("Get 2FA settings for all users.")
+    users = get_all_api360_users(settings)
+    if not users:
+        logger.info("No users found in Y360 organization.")
+        return
+
+    need_logout = []
+    count = 0
+    logger.info(f"Total users count - {len(users)}.")
+    with console.status("[bold green]Getting 2FA settings for all users from API...", spinner="dots"):
+        for user in users:
+            full_name = f"{user['name']['last']} {user['name']['first']} {user['name']['middle']}"
+            if user["id"].startswith("113"):
+                count += 1
+                if count % 10 == 0:
+                    logger.info(f"Processed {count} users (total users count - {len(users)}).")
+                mfa_dict = get_2fa_settings_from_api(settings, user) 
+
+                if mfa_dict is None:
+                    logger.error(f"Error getting 2FA settings for user {user['nickname']} ({user['id']}).")
+                    continue
+                
+                if mfa_dict["per_user_2fa"]:
+                    if mfa_dict["per_user_2fa"]["is2faEnabled"]:
+                        if mfa_dict["personal_and_phone"]:
+                            if not mfa_dict["personal_and_phone"]["hasSecurityPhone"]:
+                                if user["isEnabled"]:
+                                    need_logout.append(user)
+                                else:
+                                    logger.info(f"User disabled, skipping. ({user["nickname"]}, id - {user["id"]}, full name - {full_name}).")
+
+    if not need_logout:
+        logger.info("No users found to logout (with 2FA set and no security phone added).")
+        console.input("[dim]Press Enter to continue...[/dim]")
+        return
+    
+    if len(need_logout) == 1:
+            full_name = f"{need_logout[0]['name']['last']} {need_logout[0]['name']['first']} {need_logout[0]['name']['middle']}"
+            answer = input(f"Do you want to logout {need_logout[0]['id']} ({need_logout[0]['nickname']}, {full_name}) from Yandex 360 services? (yes/n): ")
+    else:
+        logger.info("Enabled users with 2FA set and no security phone added:")
+        if len(need_logout) <= 3:
+            for user in need_logout:
+                logger.info(f" - nickname - {user['nickname']}, id - {user['id']}, name - {user['name']['last']} {user['name']['first']} {need_logout[0]['name']['middle']}")
+        else:
+            for user in need_logout:
+                logger.debug(f" - nickname - {user['nickname']}, id - {user['id']}, name - {user['name']['last']} {user['name']['first']} {need_logout[0]['name']['middle']}")
+
+            middle_index = len(need_logout) // 2
+            logger.info(f" - nickname - {need_logout[0]['nickname']}, id - {need_logout[0]['id']}, name - {need_logout[0]['name']['last']} {need_logout[0]['name']['first']} {need_logout[0]['name']['middle']}")
+            logger.info(" - ...")
+            logger.info(f" - nickname - {need_logout[middle_index]['nickname']}, id - {need_logout[middle_index]['id']}, name - {need_logout[middle_index]['name']['last']} {need_logout[middle_index]['name']['first']} {need_logout[middle_index]['name']['middle']}")
+            logger.info(" - ...")
+            logger.info(f" - nickname - {need_logout[-1]['nickname']}, id - {need_logout[-1]['id']}, name - {need_logout[-1]['name']['last']} {need_logout[-1]['name']['first']} {need_logout[-1]['name']['middle']}")
+            if not Confirm.ask(f"[bold yellow]Do you want to logout {len(need_logout)} users from Yandex 360 services?[/bold yellow]"):
+                return
+
+    # This condition is now handled above, but keeping for single user case
+    if len(need_logout) == 1:
+        full_name = f"{need_logout[0]['name']['last']} {need_logout[0]['name']['first']} {need_logout[0]['name']['middle']}"
+        if not Confirm.ask(f"[bold yellow]Do you want to logout {need_logout[0]['id']} ({need_logout[0]['nickname']}, {full_name}) from Yandex 360 services?[/bold yellow]"):
+            return
+
+    for user in need_logout:
+        mfa_logout_single_user(settings, user)
+
+    console.input("[dim]Press Enter to continue...[/dim]")
 
 
 if __name__ == "__main__":
+    # Display startup banner
+    console.print(Panel(
+        Text.assemble(
+            ("🚀 ", "bold blue"),
+            ("Yandex 360 Text Admin Console", "bold green"),
+            (" 🚀\n", "bold blue"),
+            ("Version 2.0 with Rich UI", "cyan"),
+        ),
+        title="[bold yellow]Welcome[/bold yellow]",
+        border_style="green",
+        padding=(1, 2)
+    ))
 
     denv_path = os.path.join(os.path.dirname(__file__), '.env')
 
     if os.path.exists(denv_path):
-        load_dotenv(dotenv_path=denv_path,verbose=True, override=True)
+        with console.status("[bold green]Loading configuration...", spinner="dots"):
+            load_dotenv(dotenv_path=denv_path, verbose=True, override=True)
 
     logger.debug("\n")
     logger.debug("---------------------------------------------------------------------------.")
     logger.debug("Запуск скрипта.")
 
-    settings = get_settings()
+    with console.status("[bold green]Initializing settings...", spinner="dots"):
+        settings = get_settings()
+    
     if settings is None:
-        logger.error("Check config setting in .env file and try again.")
+        console.print("[bold red]❌ Check config setting in .env file and try again.[/bold red]")
         sys.exit(EXIT_CODE)
 
-    logger.debug("Параметры ENV:")
-    logger.debug(f"ORG_ID_ARG: {settings.org_id}")
-    logger.debug(f"SCIM_DOMAIN_ID_ARG: {settings.domain_id}")
-    logger.debug(f"IgnoreUsernameDomain: {settings.ignore_user_domain}")
+    # Display configuration info
+    config_table = Table(title="Configuration Parameters")
+    config_table.add_column("Parameter", style="cyan")
+    config_table.add_column("Value", style="green")
+    config_table.add_row("ORG_ID", str(settings.org_id))
+    config_table.add_row("SCIM_DOMAIN_ID", str(settings.domain_id))
+    config_table.add_row("Ignore Username Domain", str(settings.ignore_user_domain))
+    config_table.add_row("SCIM API Available", "❌ No" if settings.skip_scim_api_call else "✅ Yes")
+    
+    console.print(config_table)
 
     try:
         main(settings)
 
     except KeyboardInterrupt:
-        logger.info("Ctrl+C pressed. Exiting.")
+        console.print("\n[bold yellow]👋 Ctrl+C pressed. Goodbye![/bold yellow]")
         sys.exit(EXIT_CODE)
     except Exception as e:
-        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+        console.print(f"[bold red]❌ {type(e).__name__} at line {e.__traceback__.tb_lineno}: {e}[/bold red]")
         sys.exit(EXIT_CODE)
