@@ -3009,7 +3009,7 @@ def forward_rules_download_for_all_users(settings: "SettingParams"):
                 autorepaly_rules_string = "#".join([f"{rule['text']}" for rule in autoreply_dict[user["id"]]])
             f.write(f"{user['id']};{user['nickname']};{user['name']['last']} {user['name']['first']} {user['name']['middle']};{user["isEnabled"]};{forward_rules_string};{autorepaly_rules_string}\n")
         logger.info(f"{len(users)} users downloaded to file {settings.forward_rules_output_file}")
-        console.input("[dim]Press Enter to continue...[/dim]")
+    console.input("[dim]Press Enter to continue...[/dim]")
 
 def mfa_download_settings(settings):
     logger.info("Get 2FA settings for all users.")
@@ -3063,7 +3063,7 @@ def mfa_download_settings(settings):
         for user in mfa:
             f.write(f"{user['id']};{user['nickname']};{user['displayName']};{user['isEnabled']};{user['isAdmin']};{user['domain2FAEnabled']};{user['hasSecurityPhone']};{user['personal2FAEnabled']};{user['global2FAEnabled']};{user['global2FADuration']};{user['global2FAPolicy']}\n")
         logger.info(f"{len(users)} users downloaded to file {settings.users_2fa_output_file}")
-        console.input("[dim]Press Enter to continue...[/dim]")
+    console.input("[dim]Press Enter to continue...[/dim]")
 
 def get_2fa_settings_from_api(settings: "SettingParams", user):
     logger.debug(f"Getting 2fa settings for user {user["id"]} ({user["nickname"]})...")
