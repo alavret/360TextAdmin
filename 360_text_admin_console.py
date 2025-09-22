@@ -511,7 +511,7 @@ def submenu_1(settings: "SettingParams"):
         elif choice == "6":
             check_alias_prompt(settings)
         elif choice == "7":
-            show_user_attributes(settings)
+            show_user_attributes_prompt(settings)
         elif choice == "8":
             download_users_attrib_to_file(settings)
     return
@@ -554,7 +554,7 @@ def submenu_2(settings: "SettingParams"):
         elif choice == "2":
             download_users_attrib_to_file(settings)
         elif choice == "3":
-            show_user_attributes(settings)
+            show_user_attributes_prompt(settings)
 
     return
 
@@ -1194,7 +1194,7 @@ def check_alias(settings: "SettingParams", alias: str):
     if found_conflicts:
         console.print(f"[bold red]⚠️  Alias '{alias}' is already in use:[/bold red]")
         console.print(results_table)
-        console.input("[dim]Press Enter to continue...[/dim]")
+        #console.input("[dim]Press Enter to continue...[/dim]")
     else:
         console.print(f"[bold blue]✅ Alias '{alias}' is not found in Y360![/bold blue]")
 
@@ -1501,15 +1501,15 @@ def update_users_from_SCIM_userName_file(settings: "SettingParams"):
         except Exception as e:
             logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
 
-def show_user_attributes(settings: "SettingParams"):
+def show_user_attributes_prompt(settings: "SettingParams"):
     console.print(Panel(
         "[bold blue]Show User Attributes[/bold blue]\n"
         "Enter target user in one of these formats:\n"
-        "• [cyan]id:<UID>[/cyan] - User ID\n"
-        "• [cyan]userName:<SCIM_USER_NAME>[/cyan] - SCIM username\n"
+        "• [cyan]<UID>[/cyan] - User ID\n"
         "• [cyan]<API_360_NICKNAME>[/cyan] - API 360 nickname\n"
         "• [cyan]<API_360_ALIAS>[/cyan] - API 360 alias\n"
-        "• [cyan]<lastName>[/cyan] - User's last name",
+        "• [cyan]<lastName>[/cyan] - User's last name\n"
+        "• [cyan]userName:<SCIM_USER_NAME>[/cyan] - SCIM username",
         title="[green]User Attributes Viewer[/green]",
         border_style="blue"
     ))
@@ -1521,63 +1521,99 @@ def show_user_attributes(settings: "SettingParams"):
         )
         if not answer.strip():
             break
-        if ":" in answer:
-            key, value = answer.split(":")
-            key = key.strip()
-            value = value.strip().lower()
-            if key.lower() not in ["id", "username"]:
-                logger.error(f"Invalid key {key}. Please enter id:<UID> or userName:<SCIM_USER_NAME>.")
-                break
         else:
-            key = "nickname"
-            value = answer.lower()
+            show_user_attributes(settings, answer.lower())
 
-        if key == "id":
-            if not all(char.isdigit() for char in value):
-                logger.error(f"Invalid UID {value} (Must be numeric value). Please enter valid UID.")
-                break
-            if not value.startswith("113"):
-                logger.error(f"Invalid UID {value} (Must be starts with 113). Please enter valid UID.")
-                break
+def show_user_attributes(settings: "SettingParams", answer: str):
+    
+    pattern = r'[;,\s]+'
+    search_users = re.split(pattern, answer)
+    users_to_add = []
+    #rus_pattern = re.compile('[-А-Яа-яЁё]+')
+    #anti_rus_pattern = r'[^\u0400-\u04FF\s]'
 
-        logger.info(f"Saving user data for key {key} and value {value}.")
-        users = get_all_api360_users(settings)
-        scim_users = get_all_scim_users(settings)  
-        if not users:
-            logger.error("No users found from API 360 calls. Check your settings.")
-            console.input("[dim]Press Enter to continue...[/dim]")
-            break
-        if not scim_users:
-            if not settings.skip_scim_api_call:
-                logger.error("No users found from SCIM calls. Check your settings.")
-                break
+    logger.info(f"Get user data for {answer}.")
+    users = get_all_api360_users(settings)
+    scim_users = get_all_scim_users(settings)  
+    if not users:
+        logger.error("No users found from API 360 calls. Check your settings.")
+        console.input("[dim]Press Enter to continue...[/dim]")
+        return
+    if not scim_users:
+        if not settings.skip_scim_api_call:
+            logger.error("No users found from SCIM calls. Check your settings.")
+            return
+
+    found_last_name_user = []
+    for searched in search_users:
+        found_flag = False
         target_user = None
         target_scim_user = None
-        if key in ["id", "nickname"]:
-            for user in users:
-                if key == "id":
-                    if user["id"] == value:
-                        target_user = user
+        if searched.strip().lower().startswith("username:"):
+            if settings.skip_scim_api_call:
+                logger.error("SCIM API call is disabled. Please enable it to use userName search.")
+                return
+            else:
+                searched = searched.strip().lower().split(":")[1]
+                for user in scim_users:
+                    if user["userName"].lower() == searched:
+                        target_scim_user = user
+                        logger.debug(f"SCIM user found: {user['userName']} ({user['id']})")
+                        target_user = [user for user in users if user["id"] == target_scim_user["id"]][0]
+                        found_flag = True
                         break
-                elif key == "nickname":
-                    if user["nickname"].lower() == value or value in [r.lower() for r in  user["aliases"]]:
-                        target_user = user
-                        break
-        elif key.lower() == "username":
-            for user in scim_users:
-                if user["userName"].lower() == value:
-                    target_scim_user = user
-                    break
-        
-        if target_user:
-            if not settings.skip_scim_api_call:
-                target_scim_user = [user for user in scim_users if user["id"] == target_user["id"]][0]
-        elif target_scim_user:
-            target_user = [user for user in users if user["id"] == target_scim_user["id"]][0]
         else:
-            logger.error(f"No user found for key {key} and value {value}.")
-            break
-        
+            if "@" in searched.strip():
+                searched = searched.split("@")[0]
+            found_flag = False
+            if all(char.isdigit() for char in searched.strip()):
+                if len(searched.strip()) == 16 and searched.strip().startswith("113"):
+                    for user in users:
+                        if user["id"] == searched.strip():
+                            logger.debug(f"User found: {user['nickname']} ({user['id']})")
+                            target_user = user
+                            found_flag = True
+                            break
+            else:
+                found_last_name_user = []
+                for user in users:
+                    aliases_lower_case = [r.lower() for r in user["aliases"]]
+                    if user["nickname"].lower() == searched.lower().strip() or searched.lower().strip() in aliases_lower_case:
+                        logger.debug(f"User found: {user['nickname']} ({user['id']})")
+                        target_user = user
+                        found_flag = True
+                        break
+                    if user["name"]["last"].lower() == searched.lower().strip():
+                        found_last_name_user.append(user)
+                if not found_flag and found_last_name_user:
+                    if len(found_last_name_user) == 1:
+                        logger.debug(f"User found ({searched}): {found_last_name_user[0]['nickname']} ({found_last_name_user[0]['id']}, {found_last_name_user[0]['position']})")
+                        target_user = found_last_name_user[0]
+                        found_flag = True
+                    else:
+                        logger.error(f"User {searched} found more than one user:")
+                        for user in found_last_name_user:
+                            logger.error(f" - last name {user['name']['last']}, nickname {user['nickname']} ({user['id']}, {user['position']})")
+                        logger.error("Refine your search parameters.")
+                        double_users_flag = True
+                        break
+
+        if not found_flag and not double_users_flag:
+            logger.error(f"User {searched} not found in Y360 organization.")
+            continue
+        else:
+            users_to_add.append(target_user)
+
+    if not users_to_add and not double_users_flag:
+        logger.error(f"Search {answer} not found in Y360 organization.")
+        return
+
+    for target_user in users_to_add:
+        if not settings.skip_scim_api_call:
+            target_scim_user = [user for user in scim_users if user["id"] == target_user["id"]][0]
+        else:
+            target_scim_user = None
+
         # Create API 360 attributes table
         api_table = Table(title=f"API 360 attributes for user with id: {target_user['id']}")
         api_table.add_column("Attribute", style="cyan")
@@ -2325,8 +2361,6 @@ def send_perm_add_users_to_allow_list_prompt(settings: "SettingParams"):
             show_mailing_list_permissions(settings, settings.target_group)
             console.input("[dim]Press Enter to continue...[/dim]")
             break
-
-        
 
 def send_perm_remove_users_from_allow_list(settings: "SettingParams"):
 
