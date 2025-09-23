@@ -324,6 +324,8 @@ def single_mode(settings: "SettingParams", old_value, new_value):
         logger.error("List of SCIM users is empty.")
         console.input("[dim]Press Enter to continue...[/dim]")
         
+def clear_screen():
+        os.system('cls' if os.name == 'nt' else 'clear')
 
 def main(settings: "SettingParams"):
     """Основная функция скрипта."""
@@ -384,6 +386,7 @@ def main(settings: "SettingParams"):
 def main_menu(settings: "SettingParams"):
     while True:
         console.clear()
+        clear_screen()
         
         # Create main menu panel
         menu_content = Text()
@@ -433,6 +436,7 @@ def main_menu(settings: "SettingParams"):
 def submenu_1(settings: "SettingParams"):
     while True:
         console.clear()
+        clear_screen()
         
         # Create config info panel
         config_table = Table(show_header=False, box=box.SIMPLE)
@@ -519,6 +523,7 @@ def submenu_1(settings: "SettingParams"):
 def submenu_2(settings: "SettingParams"):
     while True:
         console.clear()
+        clear_screen()
         
         # Create menu content
         menu_content = Text()
@@ -561,6 +566,7 @@ def submenu_2(settings: "SettingParams"):
 def submenu_3(settings: "SettingParams"):
     while True:
         console.clear()
+        clear_screen()
         
         # Create menu content
         menu_content = Text()
@@ -603,6 +609,7 @@ def submenu_3(settings: "SettingParams"):
 def submenu_4(settings: "SettingParams"):
     while True:
         console.clear()
+        clear_screen()
         
         # Create menu content
         menu_content = Text()
@@ -653,6 +660,7 @@ def submenu_4(settings: "SettingParams"):
 def submenu_5(settings: "SettingParams"):
     while True:
         console.clear()
+        clear_screen()
         
         # Create menu content
         menu_content = Text()
@@ -707,6 +715,7 @@ def submenu_5(settings: "SettingParams"):
 def subsubmenu_30(settings: "SettingParams"):
     while True:
         console.clear()
+        clear_screen()
         
         # Create current params table
         params_table = Table(show_header=False, box=box.SIMPLE)
