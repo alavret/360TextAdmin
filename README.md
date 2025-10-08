@@ -27,6 +27,8 @@
 - Управление настройками отправителя по умолчанию
 - Просмотр и очистка правил пересылки
 - Массовое обновление настроек из файла
+- **НОВОЕ:** Получение подписи пользователя в отправляемых письмах
+- **НОВОЕ:** Массовая установка подписей пользователям с параметризированными шаблонами
 
 ### 5. Двухфакторная аутентификация (2FA)
 - Выгрузка настроек 2FA для всех пользователей
@@ -61,6 +63,12 @@
 | `DEFAULT_FORWARD_RULES_OUTPUT_FILE_ARG` | Файл для экспорта правил пересылки | Нет | `forward_rules_output.csv` |
 | `DEFAULT_2FA_SETTINGS_OUTPUT_FILE_ARG` | Файл для экспорта настроек 2FA | Нет | `users_2fa_output.csv` |
 | `DEFAULT_2FA_SETTINGS_INPUT_FILE_ARG` | Файл для импорта настроек 2FA | Нет | `users_2fa_input.csv` |
+| `EMAIL_SIGNATURE_FILE_PREFIX_ARG` | **НОВОЕ:** Префикс для файлов, где сохраняется подпись, выгруженная из Яндекс 360 | Нет | `signature_` |
+| `EMAIL_SIGNATURE_INPUT_FILE` | **НОВОЕ:** Файл с пользователями для установки подписей | Нет | `users_signature_input.csv` |
+| `EMAIL_SIGNATURE_TEMPLATE_FILE` | **НОВОЕ:** Шаблон подписи (HTML) | Нет | `signature_template.html` |
+| `EMAIL_SIGNATURE_LANGUAGE` | **НОВОЕ:** Язык подписи | Нет | `ru` |
+| `EMAIL_SIGNATURE_IS_DEFAULT` | **НОВОЕ:** Подпись по умолчанию | Нет | `false` |
+| `EMAIL_SIGNATURE_POSITION` | **НОВОЕ:** Позиция подписи | Нет | `bottom` или `under` |
 | `IgnoreUsernameDomain` | Игнорировать домен в userName | Нет | `true/false` |
 
 *\* SCIM параметры необходимы только для операций с userName*
@@ -126,6 +134,8 @@ python 360_text_admin_console.py old_nickname new_nickname nickname yes
 3. Просмотр правил пересылки для пользователя
 4. Выгрузка правил пересылки для всех пользователей
 5. Очистка правил пересылки
+6. **НОВОЕ:** Получение подписи пользователя
+7. **НОВОЕ:** Массовая установка подписей пользователям
 
 ### Подменю 5: Настройки 2FA
 1. Выгрузка настроек 2FA для всех пользователей
@@ -156,10 +166,93 @@ uid;nickname;displayName;isEnabled;isAdmin;domain2FAEnabled;hasSecurityPhone;per
 1130000069123456;ivan;Иванов Иван;true;false;true;false;false;true;86400;all_users
 ```
 
+### CSV-файл пользователей для установки подписей
+```csv
+# Пример входного файла для установки подписей
+# Строки, начинающиеся с #, игнорируются
+# В каждой строке: алиас, email, id или фамилия пользователя
+alavret
+ivan.petrov
+user@company.com
+1130000000000001
+Петров
+```
+
+## Создание параметризированного шаблона подписи
+
+### Поддерживаемые переменные
+
+В шаблоне подписи можно использовать следующие переменные в двойных фигурных скобках:
+
+| Переменная | Описание | Источник данных |
+|------------|----------|-----------------|
+| `{{first}}` | Имя | `user.name.first` |
+| `{{middle}}` | Отчество | `user.name.middle` |
+| `{{name}}` | Полное имя | `user.name.first + user.name.middle + user.name.last` |
+| `{{position}}` | Должность | `user.position` |
+| `{{mail}}` | Email адрес | Основной email пользователя (который установлен в Web Почте) |
+| `{{telephone}}` | Рабочий телефон | Из контактов пользователя |
+| `{{mobile}}` | Мобильный телефон | Из контактов пользователя |
+| `{{department}}` | Отдел | Название подразделения |
+
+### Пример HTML шаблона
+
+```html
+<div>-- </div>
+<div><em>С Уважением,</em></div>
+<div> </div>
+<div><span style="font-family:'comic sans ms' , sans-serif;font-size:16px;line-height:normal"><strong>{{name}}</strong></span></div>
+<div><blockquote><div><span style="color:#4b0082">email</span>: <a href="mailto:{{mail}}" rel="noopener noreferrer">{{mail}}</a></div></blockquote></div>
+<div><blockquote><div>Телефон: {{telephone}}</div></blockquote></div>
+<div><blockquote><div>мобильный: {{mobile}}</div></blockquote></div>
+<div><blockquote><div>Должность: {{position}}, {{department}}</div></blockquote></div>
+<div><a href="https://360.yandex.ru">site</a></div>
+<div> </div>
+<div><img src="https://avatars.mds.yandex.net/get-yapic/36689/ibZ4wLaL4Vrw5rZRmobgBL2fu0-1/islands-200" /></div>
+```
+
+### Автоматическое удаление пустых полей
+
+Система автоматически удаляет HTML элементы, содержащие пустые переменные:
+
+- Если у пользователя нет мобильного телефона, строка `<div>мобильный: {{mobile}}</div>` будет удалена
+- Если у пользователя нет должности, соответствующий блок будет скрыт
+- Пустые строки и теги автоматически очищаются
+
+### Создание шаблона
+
+1. **Создайте HTML файл** с расширением `.html`
+2. **Используйте переменные** в формате `{{variable_name}}`
+3. **Добавьте стили** для красивого оформления
+4. **Протестируйте** с разными пользователями
+
+### Примеры шаблонов
+
+#### Простой шаблон
+```html
+<div><strong>{{name}}</strong></div>
+<div>Email: {{mail}}</div>
+<div>Телефон: {{telephone}}</div>
+<div>Должность: {{position}}</div>
+```
+
+#### Корпоративный шаблон
+```html
+<div style="font-family: Arial, sans-serif; font-size: 12px; color: #333;">
+    <div><strong>{{name}}</strong></div>
+    <div>{{position}}</div>
+    <div>{{department}}</div>
+    <div>Email: <a href="mailto:{{mail}}" style="color: #0066cc;">{{mail}}</a></div>
+    <div>Телефон: {{telephone}}</div>
+    <div>Мобильный: {{mobile}}</div>
+</div>
+```
+
 ## Получение токенов
 
 ### SCIM API токен
-1. Перейдите на https://oauth.yandex.ru/client/new/
+Если у вас для организации настроен SSO режим
+1. Скопируйте SCIM 
 2. Создайте приложение с разрешением `passport:scim-api.all`
 3. Получите токен через `client_credentials`
 
@@ -193,6 +286,8 @@ uid;nickname;displayName;isEnabled;isAdmin;domain2FAEnabled;hasSecurityPhone;per
 | ya360_security:domain_sessions_read | разлогинить пользователей |
 | ya360_admin:mail_read_user_settings | Читать настройки почты пользователей |
 | ya360_admin:mail_write_user_settings | Менять настройки почты пользователей |
+| directory:read_departments | Чтение информации о подразделениях |
+| directory:write_departments | Запись информации о подразделениях |
 
 <img src="images/create_app_new_3.jpg" width="800">
 

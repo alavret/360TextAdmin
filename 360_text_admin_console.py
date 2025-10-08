@@ -44,6 +44,8 @@ USERS_PER_PAGE_FROM_API = 1000
 # MAX value is 1000
 GROUPS_PER_PAGE_FROM_API = 1000
 
+DEPARTMENTS_PER_PAGE_FROM_API = 1000
+
 EXIT_CODE = 1
 
 # Initialize Rich console
@@ -93,6 +95,12 @@ class SettingParams:
     ignore_user_domain : bool
     users_2fa_output_file : str
     users_2fa_input_file : str
+    email_signature_file_prefix : str
+    email_signature_input_file : str
+    email_signature_template_file : str
+    email_signature_language : str
+    email_signature_is_default : bool
+    email_signature_position : list
 
 def get_settings():
     exit_flag = False
@@ -110,6 +118,7 @@ def get_settings():
         forward_rules_output_file  = os.environ.get("DEFAULT_FORWARD_RULES_OUTPUT_FILE_ARG", "forward_rules_output.csv"),
         users_2fa_output_file  = os.environ.get("DEFAULT_2FA_SETTINGS_OUTPUT_FILE_ARG", "users_2fa_output.csv"),
         users_2fa_input_file  = os.environ.get("DEFAULT_2FA_SETTINGS_INPUT_FILE_ARG", "users_2fa_input.csv"),
+        email_signature_file_prefix = os.environ.get("EMAIL_SIGNATURE_FILE_PREFIX_ARG", "signature_"),
         skip_scim_api_call = False,
         target_group = {},
         all_users = [],
@@ -118,7 +127,12 @@ def get_settings():
         shared_mailboxes_get_timestamp = datetime.now(),
         all_groups = [],
         all_groups_get_timestamp = datetime.now(),
-        ignore_user_domain = False
+        ignore_user_domain = False,
+        email_signature_input_file = os.environ.get("EMAIL_SIGNATURE_INPUT_FILE", "users.csv"),
+        email_signature_template_file = os.environ.get("EMAIL_SIGNATURE_TEMPLATE_FILE", "signature_template.html"),
+        email_signature_language = os.environ.get("EMAIL_SIGNATURE_LANGUAGE", "ru"),
+        email_signature_is_default = os.environ.get("EMAIL_SIGNATURE_IS_DEFAULT", "false").lower() == "true",
+        email_signature_position = os.environ.get("EMAIL_SIGNATURE_POSITION", "bottom"),
     )
 
     if not settings.scim_token:
@@ -174,6 +188,11 @@ def get_settings():
 
     if os.environ.get("IgnoreUsernameDomain", "false").lower() == "true":
         settings.ignore_user_domain = True
+
+    if settings.email_signature_position.lower() not in ["under", "bottom"]:
+        logger.error("EMAIL_SIGNATURE_POSITION must be 'top' or 'bottom'")
+        exit_flag = True
+
     
     if exit_flag:
         return None
@@ -271,16 +290,16 @@ def single_mode(settings: "SettingParams", old_value, new_value):
         users = get_all_scim_users(settings)
     
     if users:
-        old_user = next((item for item in users if item["userName"] == old_value.lower()), None)
+        old_user = next((item for item in users if item['userName'] == old_value.lower()), None)
         if not old_user:
             console.print(f"[bold red]❌ User {old_value} not found.[/bold red]")
             return
-        new_user = next((item for item in users if item["userName"] == new_value.lower()), None)
+        new_user = next((item for item in users if item['userName'] == new_value.lower()), None)
         if new_user:
             console.print(f"[bold red]❌ User {new_value} already exists in system. Select another new value for userName.[/bold red]")
             return
         console.print(f"[green]✅ User {old_value} found. UID: {old_user['id']}. Starting change to {new_value}...[/green]")
-        uid = old_user["id"]
+        uid = old_user['id']
         headers = {
                 "Authorization": f"Bearer {settings.scim_token}"
                     }
@@ -304,7 +323,7 @@ def single_mode(settings: "SettingParams", old_value, new_value):
                 logger.debug(f"PATCH URL: {url}/v2/Users/{uid}")
                 logger.debug(f"PATCH DATA: {data}")
                 response = requests.patch(f"{url}/v2/Users/{uid}", headers=headers, json=data)
-                logger.debug(f"X-Request-Id: {response.headers.get("X-Request-Id","")}")
+                logger.debug(f"X-Request-Id: {response.headers.get('X-Request-Id','')}")
                 if response.status_code != HTTPStatus.OK.value:
                     logger.error(f"Error during PATCH request: {response.status_code}. Error message: {response.text}")
                     if retries < MAX_RETRIES:
@@ -623,7 +642,11 @@ def submenu_4(settings: "SettingParams"):
         menu_content.append("4. ", style="bold cyan")
         menu_content.append("Download forward rules for all users\n", style="white")
         menu_content.append("5. ", style="bold cyan")
-        menu_content.append("Clear forward rules for users\n\n", style="white")
+        menu_content.append("Clear forward rules for users\n", style="white")
+        menu_content.append("6. ", style="bold cyan")
+        menu_content.append("Get email signature\n", style="white")
+        menu_content.append("7. ", style="bold cyan")
+        menu_content.append("Set email signature\n\n", style="white")
         menu_content.append("0 or empty string. ", style="bold red")
         menu_content.append("Back to main menu", style="red")
 
@@ -638,7 +661,7 @@ def submenu_4(settings: "SettingParams"):
         
         choice = Prompt.ask(
             "[bold yellow]Enter your choice[/bold yellow]",
-            choices=["0", "1", "2", "3", "4", "5"],
+            choices=["0", "1", "2", "3", "4", "5", "6", "7"],
             default="0"
         )
 
@@ -654,6 +677,10 @@ def submenu_4(settings: "SettingParams"):
             forward_rules_download_for_all_users(settings)
         elif choice == "5":
             forward_rules_clear_for_user(settings)
+        elif choice == "6":
+            get_email_signature(settings)
+        elif choice == "7":
+            set_email_signature(settings)
 
     return
 
@@ -853,7 +880,7 @@ def http_get_request(url, headers):
         while True:
             logger.debug(f"GET URL - {url}")
             response = requests.get(url, headers=headers)
-            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
                 logger.error(f"!!! ERROR !!! during GET request url - {url}: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
@@ -886,7 +913,7 @@ def get_all_api360_users_from_api(settings: "SettingParams"):
             while True:
                 logger.debug(f"GET URL - {url}")
                 response = requests.get(url, headers=headers, params=params)
-                logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+                logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
                 if response.status_code != HTTPStatus.OK.value:
                     logger.error(f"!!! ERROR !!! during GET request url - {url}: {response.status_code}. Error message: {response.text}")
                     if retries < MAX_RETRIES:
@@ -898,7 +925,7 @@ def get_all_api360_users_from_api(settings: "SettingParams"):
                         break
                 else:
                     for user in response.json()['users']:
-                        if not user.get('isRobot') and int(user["id"]) >= 1130000000000000:
+                        if not user.get('isRobot') and int(user['id']) >= 1130000000000000:
                             users.append(user)
                     logger.debug(f"Get {len(response.json()['users'])} users from page {current_page} (total {last_page} page(s)).")
                     current_page += 1
@@ -935,7 +962,7 @@ def get_all_groups_from_api360(settings: "SettingParams"):
             while True:
                 logger.debug(f"GET URL - {url}")
                 response = requests.get(url, headers=headers, params=params)
-                logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+                logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
                 if response.status_code != HTTPStatus.OK.value:
                     logger.error(f"!!! ERROR !!! during GET request url - {url}: {response.status_code}. Error message: {response.text}")
                     if retries < MAX_RETRIES:
@@ -1008,7 +1035,7 @@ def get_default_email(settings: "SettingParams", userId: str):
         while True:
             logger.debug(f"GET url - {url}")
             response = requests.get(url, headers=headers)
-            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
                 logger.error(f"Error during GET request for user {userId}: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
@@ -1045,7 +1072,7 @@ def get_all_scim_users(settings: "SettingParams"):
         while True:  
             logger.debug(f"GET url - {url}")         
             response = requests.get(f"{url}/v2/Users?startIndex={startIndex}&count={items}", headers=headers)
-            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
                 logger.error(f"Error during GET request: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
@@ -1057,14 +1084,14 @@ def get_all_scim_users(settings: "SettingParams"):
                     return
             else:
                 retries = 1
-                temp_list = response.json()["Resources"]
+                temp_list = response.json()['Resources']
                 logger.debug(f'Received {len(temp_list)} records.')
                 users.extend(temp_list)
 
-                if int(response.json()["startIndex"]) + int(response.json()["itemsPerPage"]) > int(response.json()["totalResults"]) + 1:
+                if int(response.json()['startIndex']) + int(response.json()['itemsPerPage']) > int(response.json()['totalResults']) + 1:
                     break
                 else:
-                    startIndex = int(response.json()["startIndex"]) + int(response.json()["itemsPerPage"])
+                    startIndex = int(response.json()['startIndex']) + int(response.json()['itemsPerPage'])
 
     except Exception as e:
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
@@ -1072,7 +1099,7 @@ def get_all_scim_users(settings: "SettingParams"):
     
     if settings.ignore_user_domain:
         for user in users:
-            user["userName"] = user["userName"].split("@")[0]
+            user['userName'] = user['userName'].split("@")[0]
 
     return users
 
@@ -1250,11 +1277,11 @@ def change_nickname(settings: "SettingParams", old_value: str, new_value: str):
     
     if not settings.skip_scim_api_call:
         if new_value in [r.lower() for r in target_user[0]['aliases']]:
-            remove_alias_in_scim(target_user[0]["id"], new_value)
+            remove_alias_in_scim(target_user[0]['id'], new_value)
 
         for contact in target_user[0]['contacts']:
             if contact['type'] == 'email' and contact['value'].split('@')[0].lower() == new_value:
-                remove_email_in_scim(target_user[0]["id"], new_value)
+                remove_email_in_scim(target_user[0]['id'], new_value)
     
 
     logger.info(f"Changing nickname of user {old_value} to {new_value}")
@@ -1265,7 +1292,7 @@ def change_nickname(settings: "SettingParams", old_value: str, new_value: str):
     logger.debug(f"PATCH DATA: {raw_data}")
     try:
         response = requests.patch(url, headers=headers, data=json.dumps(raw_data))
-        logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+        logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
         if response.ok:
             logger.info(f"Nickname of user {old_value} changed to {new_value}")
             time.sleep(SLEEP_TIME_BETWEEN_API_CALLS)
@@ -1278,7 +1305,7 @@ def change_nickname(settings: "SettingParams", old_value: str, new_value: str):
         return 
     
     if not settings.skip_scim_api_call:
-        remove_alias_in_scim(target_user[0]["id"], old_value)
+        remove_alias_in_scim(target_user[0]['id'], old_value)
 
     logger.info("Reload list of users to reflect changes in nickname.")
     settings.all_users = None
@@ -1295,7 +1322,7 @@ def remove_alias_by_api360(settings: "SettingParams", user_id: str, alias: str):
         
         while True:
             response = requests.delete(url, headers=headers)
-            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
                 logger.error(f"Error during DELETE request: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
@@ -1319,12 +1346,12 @@ def remove_alias_in_scim(user_id: str, alias: str):
     try:
         logger.debug(f"GET url - {url}/v2/Users/{user_id}")
         response = requests.get(f"{url}/v2/Users/{user_id}", headers=headers)
-        logger.debug(f"X-Request-Id: {response.headers.get("X-Request-Id","")}")
+        logger.debug(f"X-Request-Id: {response.headers.get('X-Request-Id','')}")
         if response.ok:
             user = response.json()
             if user['urn:ietf:params:scim:schemas:extension:yandex360:2.0:User']['aliases']:
                 compiled_alias = {}
-                compiled_alias["login"] = alias
+                compiled_alias['login'] = alias
                 if compiled_alias in user['urn:ietf:params:scim:schemas:extension:yandex360:2.0:User']['aliases']:
                     user['urn:ietf:params:scim:schemas:extension:yandex360:2.0:User']['aliases'].remove(compiled_alias)
 
@@ -1344,7 +1371,7 @@ def remove_alias_in_scim(user_id: str, alias: str):
                     logger.debug(f"PATCH URL: {url}/v2/Users/{user_id}")
                     logger.debug(f"PATCH DATA: {data}")
                     response = requests.patch(f"{url}/v2/Users/{user_id}", headers=headers, data=json.dumps(data))
-                    logger.debug(f"X-Request-Id: {response.headers.get("X-Request-Id","")}")
+                    logger.debug(f"X-Request-Id: {response.headers.get('X-Request-Id','')}")
                     if response.ok:
                         logger.info(f"Alias {alias} removed in user {user_id}")
                         time.sleep(SLEEP_TIME_BETWEEN_API_CALLS)
@@ -1360,18 +1387,18 @@ def remove_email_in_scim(user_id: str, alias: str):
     try:
         logger.debug(f"GET url - {url}/v2/Users/{user_id}")
         response = requests.get(f"{url}/v2/Users/{user_id}", headers=headers)
-        logger.debug(f"X-Request-Id: {response.headers.get("X-Request-Id","")}")
+        logger.debug(f"X-Request-Id: {response.headers.get('X-Request-Id','')}")
         if response.ok:
             user = response.json()
             new_emails= []
             found_alias = False
             for email in user['emails']:
                 temp = {}
-                if email["value"].split('@')[0] != alias:
-                    temp["primary"] = email["primary"]
+                if email['value'].split('@')[0] != alias:
+                    temp['primary'] = email['primary']
                     if len(email.get("type",'')) > 0:
-                        temp["type"] = email["type"]
-                    temp["value"] = email["value"]
+                        temp['type'] = email['type']
+                    temp['value'] = email['value']
                     new_emails.append(temp)
                 else:
                     found_alias = True
@@ -1393,7 +1420,7 @@ def remove_email_in_scim(user_id: str, alias: str):
                 logger.debug(f"PATCH URL: {url}/v2/Users/{user_id}")
                 logger.debug(f"PATCH DATA: {data}") 
                 response = requests.patch(f"{url}/v2/Users/{user_id}", headers=headers, data=json.dumps(data))
-                logger.debug(f"X-Request-Id: {response.headers.get("X-Request-Id","")}")
+                logger.debug(f"X-Request-Id: {response.headers.get('X-Request-Id','')}")
                 if response.ok:
                     logger.info(f"Alias {alias} removed from email contacts in _SCIM_ user {user_id}")
                     time.sleep(SLEEP_TIME_BETWEEN_API_CALLS)
@@ -1411,11 +1438,11 @@ def create_SCIM_userName_file(settings: "SettingParams", onlyList = False):
             with open(settings.users_file, "w", encoding="utf-8") as f:
                 f.write("uid;displayName;old_userName;new_userName\n")
                 for user in users:
-                    new_userName = user["userName"]
-                    if "@" in user["userName"]:
-                        login = user["userName"].split("@")[0]
-                        domain = ".".join(user["userName"].split("@")[1].split(".")[:-1])
-                        tld = user["userName"].split("@")[1].split(".")[-1]
+                    new_userName = user['userName']
+                    if "@" in user['userName']:
+                        login = user['userName'].split("@")[0]
+                        domain = ".".join(user['userName'].split("@")[1].split(".")[:-1])
+                        tld = user['userName'].split("@")[1].split(".")[-1]
                         new_userName = settings.new_login_default_format.replace("alias", login).replace("domain", domain).replace("tld", tld)
                     f.write(f"{user['id']};{user['displayName']};{user['userName']};{new_userName}\n")
             logger.info(f"{len(users)} users downloaded to file {settings.users_file}")
@@ -1492,7 +1519,7 @@ def update_users_from_SCIM_userName_file(settings: "SettingParams"):
                 logger.debug(f"PATCH URL: {url}/v2/Users/{uid}")
                 logger.debug(f"PATCH DATA: {data}")
                 response = requests.patch(f"{url}/v2/Users/{uid}", headers=headers, json=data)
-                logger.debug(f"X-Request-Id: {response.headers.get("X-Request-Id","")}")
+                logger.debug(f"X-Request-Id: {response.headers.get('X-Request-Id','')}")
                 if response.status_code != HTTPStatus.OK.value:
                     logger.error(f"Error during PATCH request: {response.status_code}. Error message: {response.text}")
                     if retries < MAX_RETRIES:
@@ -1565,10 +1592,10 @@ def show_user_attributes(settings: "SettingParams", answer: str):
             else:
                 searched = searched.strip().lower().split(":")[1]
                 for user in scim_users:
-                    if user["userName"].lower() == searched:
+                    if user['userName'].lower() == searched:
                         target_scim_user = user
                         logger.debug(f"SCIM user found: {user['userName']} ({user['id']})")
-                        target_user = [user for user in users if user["id"] == target_scim_user["id"]][0]
+                        target_user = [user for user in users if user['id'] == target_scim_user['id']][0]
                         found_flag = True
                         break
         else:
@@ -1578,7 +1605,7 @@ def show_user_attributes(settings: "SettingParams", answer: str):
             if all(char.isdigit() for char in searched.strip()):
                 if len(searched.strip()) == 16 and searched.strip().startswith("113"):
                     for user in users:
-                        if user["id"] == searched.strip():
+                        if user['id'] == searched.strip():
                             logger.debug(f"User found: {user['nickname']} ({user['id']})")
                             target_user = user
                             found_flag = True
@@ -1586,13 +1613,13 @@ def show_user_attributes(settings: "SettingParams", answer: str):
             else:
                 found_last_name_user = []
                 for user in users:
-                    aliases_lower_case = [r.lower() for r in user["aliases"]]
-                    if user["nickname"].lower() == searched.lower().strip() or searched.lower().strip() in aliases_lower_case:
+                    aliases_lower_case = [r.lower() for r in user['aliases']]
+                    if user['nickname'].lower() == searched.lower().strip() or searched.lower().strip() in aliases_lower_case:
                         logger.debug(f"User found: {user['nickname']} ({user['id']})")
                         target_user = user
                         found_flag = True
                         break
-                    if user["name"]["last"].lower() == searched.lower().strip():
+                    if user['name']['last'].lower() == searched.lower().strip():
                         found_last_name_user.append(user)
                 if not found_flag and found_last_name_user:
                     if len(found_last_name_user) == 1:
@@ -1619,7 +1646,7 @@ def show_user_attributes(settings: "SettingParams", answer: str):
 
     for target_user in users_to_add:
         if not settings.skip_scim_api_call:
-            target_scim_user = [user for user in scim_users if user["id"] == target_user["id"]][0]
+            target_scim_user = [user for user in scim_users if user['id'] == target_user['id']][0]
         else:
             target_scim_user = None
 
@@ -1676,11 +1703,11 @@ def show_user_attributes(settings: "SettingParams", answer: str):
                         phones_str += "---\n"
                     scim_table.add_row("phoneNumbers", phones_str.strip())
                 elif k == "urn:ietf:params:scim:schemas:extension:yandex360:2.0:User":
-                    if not v["aliases"]:
+                    if not v['aliases']:
                         scim_table.add_row("aliases", "[]")
                     else:
                         aliases_str = ""
-                        for alias in v["aliases"]:
+                        for alias in v['aliases']:
                             for k1, v1 in alias.items():
                                 aliases_str += f"{k1}: {v1}\n"
                         scim_table.add_row("aliases", aliases_str.strip())
@@ -1743,11 +1770,11 @@ def show_user_attributes(settings: "SettingParams", answer: str):
                                 f.write(f" - {k1}: {v1}\n")
                             f.write(" -\n")
                     elif k == "urn:ietf:params:scim:schemas:extension:yandex360:2.0:User":
-                        if not v["aliases"]: 
+                        if not v['aliases']: 
                             f.write("aliases: []\n")
                         else:
                             f.write("aliases:\n")
-                            for l in v["aliases"]:
+                            for l in v['aliases']:
                                 for k1, v1 in l.items():
                                     f.write(f" - {k1}: {v1}\n")
                     else:
@@ -1926,7 +1953,7 @@ def show_mailing_list_permissions(settings: "SettingParams", input_group = {}):
             if not answer.strip():
                 break
         else:
-            answer = str(input_group["id"])
+            answer = str(input_group['id'])
             
         target_group, groups = get_target_group_data_prompt(settings, answer)
         if not target_group:
@@ -2043,7 +2070,7 @@ def get_mailing_list_permissions(settings: "SettingParams", group_id: str):
         while True:
             logger.debug(f"GET url - {url}")
             response = requests.get(url, headers=headers)
-            logger.debug(f"Yandex-Cloud-Request-ID: {response.headers["Yandex-Cloud-Request-ID"]}")
+            logger.debug(f"Yandex-Cloud-Request-ID: {response.headers.get('Yandex-Cloud-Request-ID', '')}")
             if response.status_code != HTTPStatus.OK.value:
                 logger.error(f"Error during GET request for group {group_id}: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
@@ -2109,13 +2136,13 @@ def default_email_create_file(settings: "SettingParams"):
             count = 0
             total = len(users)
             for user in users:
-                if user["id"].startswith("113"):
-                    default_email_json = get_default_email(settings, user["id"])
+                if user['id'].startswith("113"):
+                    default_email_json = get_default_email(settings, user['id'])
                     count += 1
                     if divmod(count, 50)[1] == 0:
                         logger.info(f"Got default email for {count} of {total} users.")
-                    email_dict[user["id"]] = default_email_json
-                    nickname_dict[user["id"]] = user["nickname"]
+                    email_dict[user['id']] = default_email_json
+                    nickname_dict[user['id']] = user['nickname']
 
         with open(settings.default_email_output_file, "w", encoding="utf-8") as f:
             f.write("nickname;new_DefaultEmail;new_DisplayName;old_DefaultEmail;old_DisplayName;uid\n")
@@ -2186,44 +2213,44 @@ def default_email_update_from_file(settings: "SettingParams"):
                 exit_flag = True
                 break
             else:
-                if user["nickname"] is None or user["nickname"].strip() == "":
+                if user['nickname'] is None or user['nickname'].strip() == "":
                     continue
                 else:
-                    user["nickname"] = user["nickname"].strip().lower()
+                    user['nickname'] = user['nickname'].strip().lower()
 
             email_empty = False
             if "new_DefaultEmail" not in user:  
-                user["new_DefaultEmail"] = ""
+                user['new_DefaultEmail'] = ""
                 email_empty = True
             else:
-                if user["new_DefaultEmail"] is None or user["new_DefaultEmail"].strip() == "":
-                    user["new_DefaultEmail"] = ""
+                if user['new_DefaultEmail'] is None or user['new_DefaultEmail'].strip() == "":
+                    user['new_DefaultEmail'] = ""
                     email_empty = True
                 else:
-                    if "@" not in user["new_DefaultEmail"].strip():
+                    if "@" not in user['new_DefaultEmail'].strip():
                         continue
                     else:
-                        user["new_DefaultEmail"] = user["new_DefaultEmail"].strip().lower()
+                        user['new_DefaultEmail'] = user['new_DefaultEmail'].strip().lower()
                         
 
             name_empty = False
             if "new_DisplayName" not in user:  
-                user["new_DisplayName"] = ""
+                user['new_DisplayName'] = ""
                 name_empty = True
             else:
-                if user["new_DisplayName"] is None or user["new_DisplayName"].strip() == "":
-                    user["new_DisplayName"] = ""
+                if user['new_DisplayName'] is None or user['new_DisplayName'].strip() == "":
+                    user['new_DisplayName'] = ""
                     name_empty = True
 
             if email_empty and name_empty:
                 continue
 
             if "old_DefaultEmail" not in user:  
-                user["old_DefaultEmail"] = ""
+                user['old_DefaultEmail'] = ""
             if "old_DisplayName" not in user:  
-                user["old_DisplayName"] = "" 
+                user['old_DisplayName'] = "" 
             if "uid" not in user:  
-                user["uid"] = ""   
+                user['uid'] = ""   
             normalized_users.append(user)
 
     if exit_flag:
@@ -2250,20 +2277,20 @@ def default_email_update_from_file(settings: "SettingParams"):
     url = f"{DEFAULT_360_API_URL}/admin/v1/org/{settings.org_id}/mail/users" 
     headers = {"Authorization": f"OAuth {settings.oauth_token}"}
     for user in normalized_users:
-        if "@" in user["nickname"]:
-            alias = user["nickname"].strip().split("@")[0]
+        if "@" in user['nickname']:
+            alias = user['nickname'].strip().split("@")[0]
         else:
-            alias = user["nickname"].strip()
+            alias = user['nickname'].strip()
         uid = ""
         for api_user in api_users:
-            if api_user["nickname"] == alias:
-                if api_user["id"].startswith("113"):
-                    uid = api_user["id"]
+            if api_user['nickname'] == alias:
+                if api_user['id'].startswith("113"):
+                    uid = api_user['id']
                     break
             else:
-                if alias in api_user["aliases"]:
-                    if api_user["id"].startswith("113"):
-                        uid = api_user["id"]
+                if alias in api_user['aliases']:
+                    if api_user['id'].startswith("113"):
+                        uid = api_user['id']
                         break
 
         if not uid:
@@ -2278,26 +2305,26 @@ def default_email_update_from_file(settings: "SettingParams"):
                 continue
             change_name = False
             change_mail = False
-            if user["new_DisplayName"].strip(): 
-                if data["fromName"] != user["new_DisplayName"].strip():
+            if user['new_DisplayName'].strip(): 
+                if data['fromName'] != user['new_DisplayName'].strip():
                     change_name = True
-            if user["new_DefaultEmail"].strip(): 
-                if data["defaultFrom"].lower() != user["new_DefaultEmail"].strip().lower():
+            if user['new_DefaultEmail'].strip(): 
+                if data['defaultFrom'].lower() != user['new_DefaultEmail'].strip().lower():
                     change_mail = True 
             if not (change_name or change_mail):
                 logger.info(f"Skipping to change email configuration for user {uid} with alias {alias} - nothing to change...")
                 continue   
             else:
-                logger.info(f"Changing user {uid} with alias {alias}: {data["fromName"]} ({data["defaultFrom"]}) to {user["new_DisplayName"]} ({user["new_DefaultEmail"]})...")
+                logger.info(f"Changing user {uid} with alias {alias}: {data['fromName']} ({data['defaultFrom']}) to {user['new_DisplayName']} ({user['new_DefaultEmail']})...")
             while True:
                 if change_name:
-                    data["fromName"] = user["new_DisplayName"].strip()
+                    data['fromName'] = user['new_DisplayName'].strip()
                 if change_mail:
-                    data["defaultFrom"] = user["new_DefaultEmail"].strip()
+                    data['defaultFrom'] = user['new_DefaultEmail'].strip()
                 logger.debug(f"POST URL: {url}/{uid}/settings/sender_info")
                 logger.debug(f"POST DATA: {data}")
                 response = requests.post(f"{url}/{uid}/settings/sender_info", headers=headers, json=data)
-                logger.debug(f"x-request-id: {response.headers.get("X-Request-Id","")}")
+                logger.debug(f"x-request-id: {response.headers.get('X-Request-Id','')}")
                 if response.status_code != HTTPStatus.OK.value:
                     logger.error(f"Error during POST request: {response.status_code}. Error message: {response.text}")
                     if retries < MAX_RETRIES:
@@ -2335,7 +2362,7 @@ def send_perm_set_target_group(settings: "SettingParams"):
         
         if not target_group:
             continue
-        elif str(target_group["emailId"]) == "0":
+        elif str(target_group['emailId']) == "0":
             console.print(f"[bold red]❌ Group with alias {answer} is not mail enabled.[/bold red]")
             settings.target_group = {}
             console.input("[dim]Press Enter to continue...[/dim]")
@@ -2426,7 +2453,7 @@ def get_shared_mailbox_detail(settings: "SettingParams"):
     count = 0
     logger.info(f"Get detail information for {len(shared_from_api)} shared mailboxex.")
     for api_shared_mailbox in shared_from_api:
-        temp = get_shared_mailbox_details_from_api(settings, api_shared_mailbox["resourceId"])
+        temp = get_shared_mailbox_details_from_api(settings, api_shared_mailbox['resourceId'])
         count += 1
         if divmod(count, 10)[1] == 0:
             logger.info(f"Got info for {count} shared mailboxes. Total count - {len(shared_from_api)}")
@@ -2489,7 +2516,7 @@ def send_perm_shared_mailbox(settings: "SettingParams"):
             found_mailbox = False
             if "@" in temp:
                 for shared_mailbox in shared_mailboxes:
-                    if shared_mailbox["email"] == temp:
+                    if shared_mailbox['email'] == temp:
                         found_mailbox = True
                         logger.info(f"Shared mailbox with name {temp} found:")
                         logger.info(f" - name{shared_mailbox['name']}, email {shared_mailbox['email']}, description {shared_mailbox['description']}")
@@ -2503,13 +2530,13 @@ def send_perm_shared_mailbox(settings: "SettingParams"):
                 found_in_name_count = 0
                 found_in_name_list = []
                 for shared_mailbox in shared_mailboxes:
-                    if temp.lower() == shared_mailbox["email"].lower().split("@")[0]:
+                    if temp.lower() == shared_mailbox['email'].lower().split("@")[0]:
                         found_mailbox = True
                         data_to_add.append({"op":op,"mailbox":shared_mailbox})
                         break
                 if not found_mailbox:
                     for shared_mailbox in shared_mailboxes:
-                        if temp.lower() in shared_mailbox["name"].lower():
+                        if temp.lower() in shared_mailbox['name'].lower():
                             found_in_name_count += 1
                             found_in_name_list.append(shared_mailbox)
                     if found_in_name_count > 1:
@@ -2532,8 +2559,8 @@ def send_perm_shared_mailbox(settings: "SettingParams"):
             logger.error("No shared mailboxes to change in send permissions. Exiting.")
             continue
 
-        added_list = [v["mailbox"] for v in data_to_add if v["op"] == "ADD_SHARED_MAILBOX"]
-        removed_list = [v["mailbox"] for v in data_to_add if v["op"] == "REMOVE_SHARED_MAILBOX"]
+        added_list = [v['mailbox'] for v in data_to_add if v['op'] == "ADD_SHARED_MAILBOX"]
+        removed_list = [v['mailbox'] for v in data_to_add if v['op'] == "REMOVE_SHARED_MAILBOX"]
 
         if added_list:
             send_perm_call_api(settings, None, "ADD_SHARED_MAILBOX", added_list)
@@ -2554,7 +2581,7 @@ def send_perm_call_api(settings: "SettingParams", users_to_change, mode, shared_
     return_value = False    
     subjects = []
     data = {}
-    data["role_actions"] = []
+    data['role_actions'] = []
     #проверяем, что в группе нет разрешения на anonymous, иначе удаляем его
     permissions = get_mailing_list_permissions(settings, settings.target_group['emailId'])
     if permissions is None:
@@ -2573,9 +2600,9 @@ def send_perm_call_api(settings: "SettingParams", users_to_change, mode, shared_
                             "type": "anonymous",
                             "id": 0
                         })
-                        data["role_actions"].append({  
+                        data['role_actions'].append({  
                             "type": "revoke",  
-                            "roles": ["mail_list_sender"],  
+                            "roles": ['mail_list_sender'],  
                             "subjects": subjects
                         })
 
@@ -2584,13 +2611,13 @@ def send_perm_call_api(settings: "SettingParams", users_to_change, mode, shared_
         for user in users_to_change:
             subjects.append({  
                 "type": "user",  
-                "id": int(user["id"]),  
+                "id": int(user['id']),  
                 "org_id": int(settings.org_id)  
                 })
 
-        data["role_actions"].append({  
+        data['role_actions'].append({  
             "type": "grant",  
-            "roles": ["mail_list_sender"],  
+            "roles": ['mail_list_sender'],  
             "subjects": subjects  
         })
 
@@ -2602,15 +2629,15 @@ def send_perm_call_api(settings: "SettingParams", users_to_change, mode, shared_
                     subjects.append(item['subject'])
 
         if subjects:
-            data["role_actions"].append({
+            data['role_actions'].append({
                 "type": "revoke",  
-                "roles": ["mail_list_sender"],  
+                "roles": ['mail_list_sender'],  
                 "subjects": subjects
             })
 
-        data["role_actions"].append({  
+        data['role_actions'].append({  
             "type": "overwrite",  
-            "roles": ["mail_list_sender"],  
+            "roles": ['mail_list_sender'],  
             "subjects": [{  
                 "type": "anonymous",  
                 "id": 0  
@@ -2626,9 +2653,9 @@ def send_perm_call_api(settings: "SettingParams", users_to_change, mode, shared_
                         subjects.append(item['subject'])
 
         if subjects:
-            data["role_actions"].append({
+            data['role_actions'].append({
                 "type": "revoke",  
-                "roles": ["mail_list_sender"],  
+                "roles": ['mail_list_sender'],  
                 "subjects": subjects
             })
 
@@ -2638,13 +2665,13 @@ def send_perm_call_api(settings: "SettingParams", users_to_change, mode, shared_
         for mailbox in shared_mailboxes:
             subjects.append({  
                 "type": "shared_mailbox",  
-                "id": int(mailbox["id"]),  
+                "id": int(mailbox['id']),  
                 "org_id": int(settings.org_id)  
                 })
 
-        data["role_actions"].append({  
+        data['role_actions'].append({  
             "type": "grant",  
-            "roles": ["mail_list_sender"],  
+            "roles": ['mail_list_sender'],  
             "subjects": subjects  
         })
 
@@ -2657,16 +2684,16 @@ def send_perm_call_api(settings: "SettingParams", users_to_change, mode, shared_
                         subjects.append(item['subject'])
 
         if subjects:
-            data["role_actions"].append({
+            data['role_actions'].append({
                 "type": "revoke",  
-                "roles": ["mail_list_sender"],  
+                "roles": ['mail_list_sender'],  
                 "subjects": subjects
             })
 
-    if not data["role_actions"]:
+    if not data['role_actions']:
         logger.error("No subjects to modify for send permissions for group {settings.target_group['name']}. Exiting.")
         return return_value
-    elif not data["role_actions"][0]["subjects"]:
+    elif not data['role_actions'][0]['subjects']:
         logger.error("No subjects to modify for send permissions for group {settings.target_group['name']}. Exiting.")
         return return_value
     try:
@@ -2675,7 +2702,7 @@ def send_perm_call_api(settings: "SettingParams", users_to_change, mode, shared_
             logger.debug(f"POST url: {url}")
             logger.debug(f"Raw POST JSON: {json.dumps(data)})")
             response = requests.post(url, headers=headers, json=data)
-            logger.debug(f"Yandex-Cloud-Request-ID: {response.headers["Yandex-Cloud-Request-ID"]}")
+            logger.debug(f"Yandex-Cloud-Request-ID: {response.headers.get('Yandex-Cloud-Request-ID', '')}")
             if not (response.status_code == 200 or response.status_code == 204):
                 logger.error(f"Error during POST request: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
@@ -2704,14 +2731,14 @@ def get_shared_mailboxes_from_api(settings: "SettingParams"):
     params = {}
     
     try:
-        params["perPage"] = 100
-        params["page"] = 1
+        params['perPage'] = 100
+        params['page'] = 1
         retries = 0
         while True: 
             logger.debug(f"GET url: {url}")
             logger.debug(f"GET Params: {params}")
             response = requests.get(url, headers=headers, params=params)
-            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
                 logger.error(f"Error during GET request: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
@@ -2723,13 +2750,13 @@ def get_shared_mailboxes_from_api(settings: "SettingParams"):
                     return False, []
             else:
                 retries = 1
-                temp_list = response.json()["resources"]
+                temp_list = response.json()['resources']
                 if temp_list:
-                    logger.info(f'Got page {params['page']} of {divmod(int(response.json()["total"]), params["perPage"])[0] +1} pages ({params["perPage"]} records per page).')
+                    logger.info(f'Got page {params["page"]} of {divmod(int(response.json()["total"]), params["perPage"])[0] +1} pages ({params["perPage"]} records per page).')
                     shared_list.extend(temp_list)
                     
-                    if  params["page"] < divmod(int(response.json()["total"]), params["perPage"])[0] + 1 :
-                        params["page"] += 1
+                    if  params['page'] < divmod(int(response.json()['total']), params['perPage'])[0] + 1 :
+                        params['page'] += 1
                     else:
                         break
 
@@ -2750,7 +2777,7 @@ def get_shared_mailbox_details_from_api(settings: "SettingParams", shared_mailbo
         while True: 
             logger.debug(f"GET url: {url}")
             response = requests.get(url, headers=headers)
-            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
                 logger.debug(f"Error during GET request: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
@@ -2818,8 +2845,8 @@ def forward_rules_show_for_user(settings: "SettingParams", user):
     forward_table.add_column("Save in Mailbox", style="cyan")
     forward_table.add_column("Rule Name", style="yellow")
     
-    if response_json["forwards"]:
-        for forward in response_json["forwards"]:
+    if response_json['forwards']:
+        for forward in response_json['forwards']:
             save_status = "✅ Yes" if forward['withStore'] else "❌ No"
             forward_table.add_row(
                 forward['address'],
@@ -2834,8 +2861,8 @@ def forward_rules_show_for_user(settings: "SettingParams", user):
     autoreply_table.add_column("Text", style="green")
     autoreply_table.add_column("Rule ID", style="yellow")
     
-    if response_json["autoreplies"]:
-        for autoreply in response_json["autoreplies"]:
+    if response_json['autoreplies']:
+        for autoreply in response_json['autoreplies']:
             autoreply_table.add_row(
                 autoreply['text'][:50] + "..." if len(autoreply['text']) > 50 else autoreply['text'],
                 str(autoreply.get('ruleId', 'N/A'))
@@ -2895,7 +2922,7 @@ def find_users_prompt(settings: "SettingParams"):
         if all(char.isdigit() for char in searched.strip()):
             if len(searched.strip()) == 16 and searched.strip().startswith("113"):
                 for user in users:
-                    if user["id"] == searched.strip():
+                    if user['id'] == searched.strip():
                         logger.debug(f"User found: {user['nickname']} ({user['id']})")
                         users_to_add.append(user)
                         found_flag = True
@@ -2904,13 +2931,13 @@ def find_users_prompt(settings: "SettingParams"):
         else:
             found_last_name_user = []
             for user in users:
-                aliases_lower_case = [r.lower() for r in user["aliases"]]
-                if user["nickname"].lower() == searched.lower().strip() or searched.lower().strip() in aliases_lower_case:
+                aliases_lower_case = [r.lower() for r in user['aliases']]
+                if user['nickname'].lower() == searched.lower().strip() or searched.lower().strip() in aliases_lower_case:
                     logger.debug(f"User found: {user['nickname']} ({user['id']})")
                     users_to_add.append(user)
                     found_flag = True
                     break
-                if user["name"]["last"].lower() == searched.lower().strip():
+                if user['name']['last'].lower() == searched.lower().strip():
                     found_last_name_user.append(user)
             if not found_flag and found_last_name_user:
                 if len(found_last_name_user) == 1:
@@ -2931,8 +2958,8 @@ def find_users_prompt(settings: "SettingParams"):
     return break_flag, double_users_flag, users_to_add
 
 def get_forward_rules_from_api(settings: "SettingParams", user):
-    logger.debug(f"Getting forward rule for user {user["id"]} ({user["nickname"]})...")
-    url = f"{DEFAULT_360_API_URL}/admin/v1/org/{settings.org_id}/mail/users/{user["id"]}/settings/user_rules"
+    logger.debug(f"Getting forward rule for user {user['id']} ({user['nickname']})...")
+    url = f"{DEFAULT_360_API_URL}/admin/v1/org/{settings.org_id}/mail/users/{user['id']}/settings/user_rules"
     headers = {"Authorization": f"OAuth {settings.oauth_token}"}
     data = {}
     try:
@@ -2940,15 +2967,15 @@ def get_forward_rules_from_api(settings: "SettingParams", user):
         while True:
             logger.debug(f"GET url - {url}")
             response = requests.get(url, headers=headers)
-            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
-                logger.error(f"Error during GET request for user {user["id"]}: {response.status_code}. Error message: {response.text}")
+                logger.error(f"Error during GET request for user {user['id']}: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
                     logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
                     time.sleep(RETRIES_DELAY_SEC * retries)
                     retries += 1
                 else:
-                    logger.error(f"Error. Getting forward rules for user {user["id"]} ({user["nickname"]}) failed.")
+                    logger.error(f"Error. Getting forward rules for user {user['id']} ({user['nickname']}) failed.")
                     break
             else:
                 data = response.json()
@@ -2959,24 +2986,24 @@ def get_forward_rules_from_api(settings: "SettingParams", user):
     return data
 
 def get_and_clear_forward_rules_by_userid(settings: "SettingParams", user):
-    #logger.info(f"Getting forward rules for user {user["id"]} ({user["nickname"]})...")
+    #logger.info(f"Getting forward rules for user {user['id']} ({user['nickname']})...")
     rules = get_forward_rules_from_api(settings, user)
     if not rules:
-        logger.info(f"No forward or autoreplays rules found for user {user["id"]} ({user["nickname"]}).")
+        logger.info(f"No forward or autoreplays rules found for user {user['id']} ({user['nickname']}).")
         return
     rules_ids = []
-    if rules["forwards"]:
-        for forward in rules["forwards"]:
-            logger.info(f"Clearing forwards rule {forward["ruleId"]}: address - {forward["address"]}, save and forward - {forward['withStore']}, rule name - {forward['ruleName']}.")
-            rules_ids.append(forward["ruleId"])
+    if rules['forwards']:
+        for forward in rules['forwards']:
+            logger.info(f"Clearing forwards rule {forward['ruleId']}: address - {forward['address']}, save and forward - {forward['withStore']}, rule name - {forward['ruleName']}.")
+            rules_ids.append(forward['ruleId'])
     else:
-        logger.info(f"No forward rules found for user {user["id"]} ({user["nickname"]}).")
-    if rules["autoreplies"]:
-        for autoreply in rules["autoreplies"]:
-            logger.info(f"Clearing autoreply rule {autoreply["ruleId"]}: text - {autoreply["text"]}.")
-            rules_ids.append(autoreply["ruleId"])
+        logger.info(f"No forward rules found for user {user['id']} ({user['nickname']}).")
+    if rules['autoreplies']:
+        for autoreply in rules['autoreplies']:
+            logger.info(f"Clearing autoreply rule {autoreply['ruleId']}: text - {autoreply['text']}.")
+            rules_ids.append(autoreply['ruleId'])
     else:
-        logger.info(f"No autoreply rules found for user {user["id"]} ({user["nickname"]}).")
+        logger.info(f"No autoreply rules found for user {user['id']} ({user['nickname']}).")
     if rules_ids:
         for rule_id in rules_ids:
             clear_forward_rule_by_api(settings, user, rule_id)
@@ -2984,24 +3011,24 @@ def get_and_clear_forward_rules_by_userid(settings: "SettingParams", user):
 
 def clear_forward_rule_by_api(settings: "SettingParams", user, ruleId):
 
-    url = f"{DEFAULT_360_API_URL}/admin/v1/org/{settings.org_id}/mail/users/{user["id"]}/settings/user_rules/{ruleId}"
+    url = f"{DEFAULT_360_API_URL}/admin/v1/org/{settings.org_id}/mail/users/{user['id']}/settings/user_rules/{ruleId}"
     headers = {"Authorization": f"OAuth {settings.oauth_token}"}
-    logger.info(f"Clearing forward rule {ruleId} for user {user["id"]} ({user["nickname"]})...")
+    logger.info(f"Clearing forward rule {ruleId} for user {user['id']} ({user['nickname']})...")
     logger.debug(f"DELETE URL: {url}")
     try:
         retries = 1
         while True:
             
             response = requests.delete(url, headers=headers)
-            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
-                logger.error(f"Error during DELETE request for user {user["id"]}: {response.status_code}. Error message: {response.text}")
+                logger.error(f"Error during DELETE request for user {user['id']}: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
                     logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
                     time.sleep(RETRIES_DELAY_SEC * retries)
                     retries += 1
                 else:
-                    logger.error(f"Error. Clearing forward rules for user {user["id"]} ({user["nickname"]}) failed.")
+                    logger.error(f"Error. Clearing forward rules for user {user['id']} ({user['nickname']}) failed.")
                     break
             else:
                 break
@@ -3024,33 +3051,33 @@ def forward_rules_download_for_all_users(settings: "SettingParams"):
     logger.info(f"Total users count - {len(users)}.")
     with console.status("[bold green]Getting forward rules for all users from API...", spinner="dots"):
         for user in users:
-            if user["id"].startswith("113"):
+            if user['id'].startswith("113"):
                 count += 1
                 if count % 10 == 0:
                     logger.info(f"Processed {count} users (total users count - {len(users)}).")
                 response_json = get_forward_rules_from_api(settings, user) 
                 if response_json:   
-                    if response_json["forwards"]:
+                    if response_json['forwards']:
                         rules = []
-                        for forward in response_json["forwards"]:
+                        for forward in response_json['forwards']:
                             rules.append(forward)
-                        forward_dict[user["id"]] = rules
-                    if response_json["autoreplies"]:
+                        forward_dict[user['id']] = rules
+                    if response_json['autoreplies']:
                         rules = []
-                        for autoreply in response_json["autoreplies"]:
+                        for autoreply in response_json['autoreplies']:
                             rules.append(autoreply)
-                        autoreply_dict[user["id"]] = rules
+                        autoreply_dict[user['id']] = rules
 
     with open(settings.forward_rules_output_file, "w", encoding="utf-8") as f:
         f.write("uid;nickname;displayName;isEnabled;forwardRules;Autoreplays\n")
         for user in users:
             forward_rules_string = ""
             autorepaly_rules_string = ""
-            if user["id"] in forward_dict.keys():
-                forward_rules_string = ",".join([f"{rule['address']}|{rule['withStore']}" for rule in forward_dict[user["id"]]])
-            if user["id"] in autoreply_dict.keys():
-                autorepaly_rules_string = "#".join([f"{rule['text']}" for rule in autoreply_dict[user["id"]]])
-            f.write(f"{user['id']};{user['nickname']};{user['name']['last']} {user['name']['first']} {user['name']['middle']};{user["isEnabled"]};{forward_rules_string};{autorepaly_rules_string}\n")
+            if user['id'] in forward_dict.keys():
+                forward_rules_string = ",".join([f"{rule['address']}|{rule['withStore']}" for rule in forward_dict[user['id']]])
+            if user['id'] in autoreply_dict.keys():
+                autorepaly_rules_string = "#".join([f"{rule['text']}" for rule in autoreply_dict[user['id']]])
+            f.write(f"{user['id']};{user['nickname']};{user['name']['last']} {user['name']['first']} {user['name']['middle']};{user['isEnabled']};{forward_rules_string};{autorepaly_rules_string}\n")
         logger.info(f"{len(users)} users downloaded to file {settings.forward_rules_output_file}")
     console.input("[dim]Press Enter to continue...[/dim]")
 
@@ -3067,37 +3094,37 @@ def mfa_download_settings(settings):
     with console.status("[bold green]Getting 2FA settings for all users from API...", spinner="dots"):
         for user in users:
             user_mfa = {}
-            if user["id"].startswith("113"):
-                user_mfa["id"] = user["id"]
-                user_mfa["nickname"] = user["nickname"]
-                user_mfa["displayName"] = user["name"]["last"] + " " + user["name"]["first"] + " " + user["name"]["middle"]
-                user_mfa["isEnabled"] = user["isEnabled"]
-                user_mfa["isAdmin"] = user["isAdmin"]
+            if user['id'].startswith("113"):
+                user_mfa['id'] = user['id']
+                user_mfa['nickname'] = user['nickname']
+                user_mfa['displayName'] = user['name']['last'] + " " + user['name']['first'] + " " + user['name']['middle']
+                user_mfa['isEnabled'] = user['isEnabled']
+                user_mfa['isAdmin'] = user['isAdmin']
                 count += 1
                 if count % 10 == 0:
                     logger.info(f"Processed {count} users (total users count - {len(users)}).")
                 mfa_dict = get_2fa_settings_from_api(settings, user) 
 
-                if mfa_dict["personal_and_phone"]:
-                    user_mfa["personal2FAEnabled"] = mfa_dict["personal_and_phone"]["has2fa"]
-                    user_mfa["hasSecurityPhone"] = mfa_dict["personal_and_phone"]["hasSecurityPhone"]
+                if mfa_dict['personal_and_phone']:
+                    user_mfa['personal2FAEnabled'] = mfa_dict['personal_and_phone']['has2fa']
+                    user_mfa['hasSecurityPhone'] = mfa_dict['personal_and_phone']['hasSecurityPhone']
                 else:
-                    user_mfa["personal2FAEnabled"] = ""
-                    user_mfa["hasSecurityPhone"] = ""
+                    user_mfa['personal2FAEnabled'] = ""
+                    user_mfa['hasSecurityPhone'] = ""
 
-                if mfa_dict["per_user_2fa"]:
-                    user_mfa["domain2FAEnabled"] = mfa_dict["per_user_2fa"]["is2faEnabled"]
+                if mfa_dict['per_user_2fa']:
+                    user_mfa['domain2FAEnabled'] = mfa_dict['per_user_2fa']['is2faEnabled']
                 else:
-                    user_mfa["domain2FAEnabled"] = ""
+                    user_mfa['domain2FAEnabled'] = ""
 
-                if mfa_dict["domain_2fa"]:
-                    user_mfa["global2FAEnabled"] = mfa_dict["domain_2fa"]["enabled"]
-                    user_mfa["global2FADuration"] = mfa_dict["domain_2fa"]["duration"]
-                    user_mfa["global2FAPolicy"] = mfa_dict["domain_2fa"]["scope"]
+                if mfa_dict['domain_2fa']:
+                    user_mfa['global2FAEnabled'] = mfa_dict['domain_2fa']['enabled']
+                    user_mfa['global2FADuration'] = mfa_dict['domain_2fa']['duration']
+                    user_mfa['global2FAPolicy'] = mfa_dict['domain_2fa']['scope']
                 else:
-                    user_mfa["global2FAEnabled"] = ""
-                    user_mfa["global2FADuration"] = ""
-                    user_mfa["global2FAPolicy"] = ""
+                    user_mfa['global2FAEnabled'] = ""
+                    user_mfa['global2FADuration'] = ""
+                    user_mfa['global2FAPolicy'] = ""
 
                 mfa.append(user_mfa)
 
@@ -3109,10 +3136,10 @@ def mfa_download_settings(settings):
     console.input("[dim]Press Enter to continue...[/dim]")
 
 def get_2fa_settings_from_api(settings: "SettingParams", user):
-    logger.debug(f"Getting 2fa settings for user {user["id"]} ({user["nickname"]})...")
+    logger.debug(f"Getting 2fa settings for user {user['id']} ({user['nickname']})...")
 
-    url_personal_and_phone = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users/{user["id"]}/2fa"
-    url_enable_per_user_2fa = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users/{user["id"]}/domain_2fa"
+    url_personal_and_phone = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users/{user['id']}/2fa"
+    url_enable_per_user_2fa = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users/{user['id']}/domain_2fa"
     url_domain_2fa = f"{DEFAULT_360_API_URL}/security/v2/org/{settings.org_id}/domain_2fa"
 
     headers = {"Authorization": f"OAuth {settings.oauth_token}"}
@@ -3123,15 +3150,15 @@ def get_2fa_settings_from_api(settings: "SettingParams", user):
         while True:
             logger.debug(f"GET url - {url_personal_and_phone}")
             response = requests.get(url_personal_and_phone, headers=headers)
-            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
-                logger.error(f"Error during GET request for user {user["id"]}: {response.status_code}. Error message: {response.text}")
+                logger.error(f"Error during GET request for user {user['id']}: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
                     logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
                     time.sleep(RETRIES_DELAY_SEC * retries)
                     retries += 1
                 else:
-                    logger.error(f"Error. Getting personal and phone 2fa settings for user {user["id"]} ({user["nickname"]}) failed.")
+                    logger.error(f"Error. Getting personal and phone 2fa settings for user {user['id']} ({user['nickname']}) failed.")
                     break
             else:
                 data = response.json()
@@ -3139,7 +3166,7 @@ def get_2fa_settings_from_api(settings: "SettingParams", user):
     except requests.exceptions.RequestException as e:
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
     
-    output["personal_and_phone"] = data
+    output['personal_and_phone'] = data
 
     data = {}
     try:
@@ -3147,15 +3174,15 @@ def get_2fa_settings_from_api(settings: "SettingParams", user):
         while True:
             logger.debug(f"GET url - {url_enable_per_user_2fa}")
             response = requests.get(url_enable_per_user_2fa, headers=headers)
-            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
-                logger.error(f"Error during GET request for user {user["id"]}: {response.status_code}. Error message: {response.text}")
+                logger.error(f"Error during GET request for user {user['id']}: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
                     logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
                     time.sleep(RETRIES_DELAY_SEC * retries)
                     retries += 1
                 else:
-                    logger.error(f"Error. Getting per user 2fa settings for user {user["id"]} ({user["nickname"]}) failed.")
+                    logger.error(f"Error. Getting per user 2fa settings for user {user['id']} ({user['nickname']}) failed.")
                     break
             else:
                 data = response.json()
@@ -3163,7 +3190,7 @@ def get_2fa_settings_from_api(settings: "SettingParams", user):
     except requests.exceptions.RequestException as e:
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
     
-    output["per_user_2fa"] = data
+    output['per_user_2fa'] = data
 
     data = {}
     try:
@@ -3171,15 +3198,15 @@ def get_2fa_settings_from_api(settings: "SettingParams", user):
         while True:
             logger.debug(f"GET url - {url_domain_2fa}")
             response = requests.get(url_domain_2fa, headers=headers)
-            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
-                logger.error(f"Error during GET request for user {user["id"]}: {response.status_code}. Error message: {response.text}")
+                logger.error(f"Error during GET request for user {user['id']}: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
                     logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
                     time.sleep(RETRIES_DELAY_SEC * retries)
                     retries += 1
                 else:
-                    logger.error(f"Error. Getting domain 2fa settings for user {user["id"]} ({user["nickname"]}) failed.")
+                    logger.error(f"Error. Getting domain 2fa settings for user {user['id']} ({user['nickname']}) failed.")
                     break
             else:
                 data = response.json()
@@ -3187,7 +3214,7 @@ def get_2fa_settings_from_api(settings: "SettingParams", user):
     except requests.exceptions.RequestException as e:
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
     
-    output["domain_2fa"] = data
+    output['domain_2fa'] = data
 
     return output
 
@@ -3240,22 +3267,22 @@ def mfa_show_settings_for_user(settings: "SettingParams", user: dict):
     mfa_table.add_column("Setting", style="cyan")
     mfa_table.add_column("Status", style="green")
     
-    has_phone = mfa_dict["personal_and_phone"].get("hasSecurityPhone", False)
+    has_phone = mfa_dict['personal_and_phone'].get("hasSecurityPhone", False)
     mfa_table.add_row("Has security phone:", "✅ Yes" if has_phone else "❌ No")
     
-    domain_2fa = mfa_dict["per_user_2fa"].get("is2faEnabled", False)
+    domain_2fa = mfa_dict['per_user_2fa'].get("is2faEnabled", False)
     mfa_table.add_row("Domain 2FA enabled:", "✅ Yes" if domain_2fa else "❌ No")
     
-    personal_2fa = mfa_dict["personal_and_phone"].get("has2fa", False)
+    personal_2fa = mfa_dict['personal_and_phone'].get("has2fa", False)
     mfa_table.add_row("Personal 2FA enabled:", "✅ Yes" if personal_2fa else "❌ No")
     
-    global_2fa = mfa_dict["domain_2fa"].get("enabled", False)
+    global_2fa = mfa_dict['domain_2fa'].get("enabled", False)
     mfa_table.add_row("Global 2FA enabled:", "✅ Yes" if global_2fa else "❌ No")
     
-    duration = mfa_dict["domain_2fa"].get("duration", "Unknown")
+    duration = mfa_dict['domain_2fa'].get("duration", "Unknown")
     mfa_table.add_row("Global 2FA duration:", str(duration))
     
-    policy = mfa_dict["domain_2fa"].get("scope", "Unknown")
+    policy = mfa_dict['domain_2fa'].get("scope", "Unknown")
     mfa_table.add_row("Global 2FA policy:", str(policy))
     
     mfa_panel = Panel(
@@ -3284,24 +3311,23 @@ def mfa_reset_personal_phone_prompt(settings: "SettingParams"):
             continue
 
         for user in users_to_add:
-            logger.info(f"Check if {user["id"]} ({user["nickname"]}) has security phone.")
+            logger.info(f"Check if {user['id']} ({user['nickname']}) has security phone.")
             mfa = get_2fa_settings_from_api(settings, user)
-            if mfa["personal_and_phone"].get("hasSecurityPhone", False):
+            if mfa['personal_and_phone'].get("hasSecurityPhone", False):
                 mfa_reset_personal_phone(settings, user)
             else:
-                logger.info(f"{user["id"]} ({user["nickname"]}) has no security phone. Skipping.")
-        
+                logger.info(f"{user['id']} ({user['nickname']}) has no security phone. Skipping.")
 
 def mfa_reset_personal_phone(settings: "SettingParams", user: dict):
-    logger.info(f"Deleting security phone for user {user["id"]} ({user["nickname"]})")
+    logger.info(f"Deleting security phone for user {user['id']} ({user['nickname']})")
     try:
         retries = 1
-        url = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users/{user["id"]}/2fa"
+        url = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users/{user['id']}/2fa"
         headers = {"Authorization": f"OAuth {settings.oauth_token}"}
         logger.debug(f"DELETE URL: {url}")
         while True:
             response = requests.delete(url, headers=headers)
-            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
                 logger.error(f"Error during DELETE request: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
@@ -3309,14 +3335,13 @@ def mfa_reset_personal_phone(settings: "SettingParams", user: dict):
                     time.sleep(RETRIES_DELAY_SEC * retries)
                     retries += 1
                 else:
-                    logger.error(f"Error. Deleting security phone for uid {user["id"]} ({user["nickname"]}) failed.")
+                    logger.error(f"Error. Deleting security phone for uid {user['id']} ({user['nickname']}) failed.")
                     break
             else:
-                logger.info(f"Success - Successfully deleted security phone for uid {user["id"]} ({user["nickname"]}).")
+                logger.info(f"Success - Successfully deleted security phone for uid {user['id']} ({user['nickname']}).")
                 break
     except Exception as e:
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
-
 
 def mfa_logout_single_user_prompt(settings: "SettingParams"):
     logger.info("Logout users from Yandex 360 services.")
@@ -3344,15 +3369,15 @@ def mfa_logout_single_user_prompt(settings: "SettingParams"):
             mfa_logout_single_user(settings, user)
 
 def mfa_logout_single_user(settings: "SettingParams", user: dict):
-    logger.info(f"Logout user {user["id"]} ({user["nickname"]}) from Yandex 360 services.")
+    logger.info(f"Logout user {user['id']} ({user['nickname']}) from Yandex 360 services.")
     try:
         retries = 1
-        url = f"{DEFAULT_360_API_URL}/security/v1/org/{settings.org_id}/domain_sessions/users/{user["id"]}/logout"
+        url = f"{DEFAULT_360_API_URL}/security/v1/org/{settings.org_id}/domain_sessions/users/{user['id']}/logout"
         headers = {"Authorization": f"OAuth {settings.oauth_token}"}
         logger.debug(f"PUT URL: {url}")
         while True:
             response = requests.put(url, headers=headers)
-            logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
                 logger.error(f"Error during PUT request: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
@@ -3360,10 +3385,10 @@ def mfa_logout_single_user(settings: "SettingParams", user: dict):
                     time.sleep(RETRIES_DELAY_SEC * retries)
                     retries += 1
                 else:
-                    logger.error(f"Error. Logout user {user["id"]} ({user["nickname"]}) failed.")
+                    logger.error(f"Error. Logout user {user['id']} ({user['nickname']}) failed.")
                     break
             else:
-                logger.info(f"Success - Successfully logout user uid {user["id"]} ({user["nickname"]}).")
+                logger.info(f"Success - Successfully logout user uid {user['id']} ({user['nickname']}).")
                 break
     except Exception as e:
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
@@ -3409,7 +3434,7 @@ def mfa_logout_users_from_file(settings: "SettingParams"):
         if all(char.isdigit() for char in searched.strip()):
             if len(searched.strip()) == 16 and searched.strip().startswith("113"):
                 for user in users:
-                    if user["id"] == searched.strip():
+                    if user['id'] == searched.strip():
                         logger.debug(f"User found: {user['nickname']} ({user['id']})")
                         users_to_add.append(user)
                         found_flag = True
@@ -3417,13 +3442,13 @@ def mfa_logout_users_from_file(settings: "SettingParams"):
         else:
             found_last_name_user = []
             for user in users:
-                aliases_lower_case = [r.lower() for r in user["aliases"]]
-                if user["nickname"].lower() == searched.lower().strip() or searched.lower().strip() in aliases_lower_case:
+                aliases_lower_case = [r.lower() for r in user['aliases']]
+                if user['nickname'].lower() == searched.lower().strip() or searched.lower().strip() in aliases_lower_case:
                     logger.debug(f"User found: {user['nickname']} ({user['id']})")
                     users_to_add.append(user)
                     found_flag = True
                     break
-                if user["name"]["last"].lower() == searched.lower().strip():
+                if user['name']['last'].lower() == searched.lower().strip():
                     found_last_name_user.append(user)
             if not found_flag and found_last_name_user:
                 if len(found_last_name_user) == 1:
@@ -3488,7 +3513,7 @@ def mfa_logout_users_with_no_phone(settings: "SettingParams"):
     with console.status("[bold green]Getting 2FA settings for all users from API...", spinner="dots"):
         for user in users:
             full_name = f"{user['name']['last']} {user['name']['first']} {user['name']['middle']}"
-            if user["id"].startswith("113"):
+            if user['id'].startswith("113"):
                 count += 1
                 if count % 10 == 0:
                     logger.info(f"Processed {count} users (total users count - {len(users)}).")
@@ -3498,14 +3523,14 @@ def mfa_logout_users_with_no_phone(settings: "SettingParams"):
                     logger.error(f"Error getting 2FA settings for user {user['nickname']} ({user['id']}).")
                     continue
                 
-                if mfa_dict["per_user_2fa"]:
-                    if mfa_dict["per_user_2fa"]["is2faEnabled"]:
-                        if mfa_dict["personal_and_phone"]:
-                            if not mfa_dict["personal_and_phone"]["hasSecurityPhone"]:
-                                if user["isEnabled"]:
+                if mfa_dict['per_user_2fa']:
+                    if mfa_dict['per_user_2fa']['is2faEnabled']:
+                        if mfa_dict['personal_and_phone']:
+                            if not mfa_dict['personal_and_phone']['hasSecurityPhone']:
+                                if user['isEnabled']:
                                     need_logout.append(user)
                                 else:
-                                    logger.info(f"User disabled, skipping. ({user["nickname"]}, id - {user["id"]}, full name - {full_name}).")
+                                    logger.info(f"User disabled, skipping. ({user['nickname']}, id - {user['id']}, full name - {full_name}).")
 
     if not need_logout:
         logger.info("No users found to logout (with 2FA set and no security phone added).")
@@ -3544,6 +3569,582 @@ def mfa_logout_users_with_no_phone(settings: "SettingParams"):
 
     console.input("[dim]Press Enter to continue...[/dim]")
 
+def find_user_by_search_term(settings: "SettingParams", search_term: str):
+    """
+    Find user by login, email, uid or last name
+    """
+    users = get_all_api360_users(settings)
+    if not users:
+        logger.error("No users found in Y360 organization.")
+        return None
+
+    # Remove @domain if present
+    if "@" in search_term:
+        search_term = search_term.split("@")[0]
+    
+    search_term = search_term.strip()
+    
+    # Check if it's a UID (16 digits starting with 113)
+    if all(char.isdigit() for char in search_term) and len(search_term) == 16 and search_term.startswith("113"):
+        for user in users:
+            if user['id'] == search_term:
+                logger.info(f"User found by UID: {user['nickname']} ({user['id']})")
+                return user
+    
+    # Search by nickname or aliases
+    for user in users:
+        aliases_lower_case = [alias.lower() for alias in user['aliases']]
+        if (user['nickname'].lower() == search_term.lower() or 
+            search_term.lower() in aliases_lower_case):
+            logger.info(f"User found by nickname/alias: {user['nickname']} ({user['id']})")
+            return user
+    
+    # Search by last name
+    found_users = []
+    for user in users:
+        if user['name']['last'].lower() == search_term.lower():
+            found_users.append(user)
+    
+    if len(found_users) == 1:
+        logger.info(f"User found by last name: {found_users[0]['nickname']} ({found_users[0]['id']})")
+        return found_users[0]
+    elif len(found_users) > 1:
+        logger.error(f"Multiple users found with last name '{search_term}':")
+        for user in found_users:
+            logger.error(f" - {user['name']['last']}, {user['nickname']} ({user['id']}, {user['position']})")
+        return None
+    
+    logger.error(f"User '{search_term}' not found in Y360 organization.")
+    return None
+
+def get_user_email_signature(settings: "SettingParams", user_id: str):
+    """
+    Get email signature for user via API 360
+    """
+    logger.info(f"Getting email signature for user {user_id}...")
+    url = f"{DEFAULT_360_API_URL}/admin/v1/org/{settings.org_id}/mail/users/{user_id}/settings/sender_info"
+    headers = {"Authorization": f"OAuth {settings.oauth_token}"}
+    
+    try:
+        retries = 1
+        while True:
+            logger.debug(f"GET url - {url}")
+            response = requests.get(url, headers=headers)
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id', '')}")
+            
+            if response.status_code != HTTPStatus.OK.value:
+                logger.error(f"Error during GET request for user {user_id}: {response.status_code}. Error message: {response.text}")
+                if retries < MAX_RETRIES:
+                    logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
+                    time.sleep(RETRIES_DELAY_SEC * retries)
+                    retries += 1
+                else:
+                    logger.error(f"Error. Getting email signature for user {user_id} failed.")
+                    return None
+            else:
+                data = response.json()
+                break
+    except requests.exceptions.RequestException as e:
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+        return None
+    
+    return data
+
+def save_signature_to_file(settings: "SettingParams", user: dict, signature_data: dict):
+    """
+    Save email signature to file
+    """
+    if not signature_data or 'signs' not in signature_data:
+        logger.warning(f"No signature data found for user {user['nickname']}")
+        return None
+    
+    signs = signature_data.get('signs', [])
+    if not signs:
+        logger.warning(f"No signatures found for user {user['nickname']}")
+        return None
+    
+    # Create filename with prefix and user login
+    filename = f"{settings.email_signature_file_prefix}{user['nickname']}.txt"
+    
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(f"Email Signatures for {user['nickname']}\n")
+            f.write("=" * 50 + "\n\n")
+            
+            for i, sign in enumerate(signs, 1):
+                f.write(f"Signature {i}:\n")
+                f.write(f"  Language: {sign.get('lang', 'N/A')}\n")
+                f.write(f"  Default: {sign.get('isDefault', False)}\n")
+                f.write(f"  Emails: {', '.join(sign.get('emails', []))}\n")
+                f.write(f"  Text:\n{sign.get('text', '')}\n")
+                f.write("-" * 30 + "\n\n")
+        
+        logger.info(f"Signatures saved to file: {filename}")
+        return filename
+    except Exception as e:
+        logger.error(f"Error saving signature to file {filename}: {e}")
+        return None
+
+def get_email_signature(settings: "SettingParams"):
+    """
+    Main function to get email signature for a user
+    """
+    console.clear()
+    clear_screen()
+    
+    # Create header
+    header_panel = Panel(
+        "[bold blue]📧 Get Email Signature[/bold blue]",
+        title="[bold green]Email Signature Retrieval[/bold green]",
+        border_style="green",
+        padding=(1, 2)
+    )
+    console.print(header_panel)
+    
+    # Get user search term
+    search_term = Prompt.ask(
+        "[bold yellow]Enter user login, email, UID or last name[/bold yellow]",
+        default=""
+    )
+    
+    if not search_term.strip():
+        logger.info("No search term provided.")
+        return
+    
+    # Find user
+    with console.status("[bold green]Searching for user..."):
+        user = find_user_by_search_term(settings, search_term)
+    
+    if not user:
+        console.print("[bold red]❌ User not found.[/bold red]")
+        return
+    
+    # Get signature
+    with console.status("[bold green]Getting email signature..."):
+        signature_data = get_user_email_signature(settings, user['id'])
+    
+    if not signature_data:
+        console.print("[bold red]❌ Failed to get email signature.[/bold red]")
+        return
+    
+    # Display signatures in console
+    signs = signature_data.get('signs', [])
+    if signs:
+        console.print(f"\n[bold green]📝 Email Signatures for {user['nickname']}:[/bold green]")
+        
+        for i, sign in enumerate(signs, 1):
+            # Create signature info
+            sign_info = []
+            sign_info.append(f"[bold cyan]Language:[/bold cyan] {sign.get('lang', 'N/A')}")
+            sign_info.append(f"[bold cyan]Default:[/bold cyan] {sign.get('isDefault', False)}")
+            sign_info.append(f"[bold cyan]Emails:[/bold cyan] {', '.join(sign.get('emails', []))}")
+            
+            # Create panel for each signature
+            sign_text = sign.get('text', '')
+            if sign_text.strip():
+                sign_content = "\n".join(sign_info) + f"\n\n[bold yellow]Text:[/bold yellow]\n{sign_text}"
+                console.print(Panel(sign_content, title=f"Signature {i}", border_style="blue"))
+            else:
+                console.print(Panel("\n".join(sign_info), title=f"Signature {i} (empty text)", border_style="yellow"))
+        
+        # Save to file
+        filename = save_signature_to_file(settings, user, signature_data)
+        if filename:
+            console.print(f"[bold green]✅ Signatures saved to: {filename}[/bold green]")
+        else:
+            console.print("[bold red]❌ Failed to save signatures to file.[/bold red]")
+    else:
+        console.print("[bold yellow]⚠️ No signatures found for this user.[/bold yellow]")
+    
+    # Wait for user input before returning to menu
+    console.print("\n[bold cyan]Press Enter to continue...[/bold cyan]")
+    input()
+
+def read_users_from_file(file_path: str):
+    """
+    Read users from input file, skipping lines starting with #
+    """
+    users = []
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    users.append({
+                        'line_num': line_num,
+                        'search_term': line,
+                        'user': None,
+                        'error': None
+                    })
+        return users
+    except Exception as e:
+        logger.error(f"Error reading file {file_path}: {e}")
+        return None
+
+def validate_users(settings: "SettingParams", users_data: list):
+    """
+    Validate users and find corresponding users in Y360
+    """
+    all_users = get_all_api360_users(settings)
+    if not all_users:
+        logger.error("No users found in Y360 organization.")
+        return False
+    
+    problematic_lines = []
+    
+    for user_data in users_data:
+        search_term = user_data['search_term']
+        
+        # Find user using existing function
+        found_user = find_user_by_search_term(settings, search_term)
+        
+        if found_user:
+            user_data['user'] = found_user
+            logger.info(f"User found for '{search_term}': {found_user['nickname']} ({found_user['id']})")
+        else:
+            user_data['error'] = f"User '{search_term}' not found"
+            problematic_lines.append(user_data)
+            logger.error(f"User '{search_term}' not found")
+    
+    return problematic_lines
+
+def load_signature_template(template_path: str):
+    """
+    Load signature template from file
+    """
+    try:
+        with open(template_path, 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception as e:
+        logger.error(f"Error loading template {template_path}: {e}")
+        return None
+
+def substitute_template_variables(template: str, user: dict, deps: list, primary_email: str):
+    """
+    Substitute user variables in template with double curly braces {{field}}
+    Hide sections with empty values
+    """
+    #получение departament и основного email
+    if user['departmentId'] == 1:
+        department = ''
+    else:
+        for dep in deps:
+            if dep['id'] == user['departmentId']:
+                department = dep['name']
+                break
+
+    # Get user attributes
+    first_name = user.get('name', {}).get('first', '')
+    middle_name = user.get('name', {}).get('middle', '')
+    last_name = user.get('name', {}).get('last', '')
+    full_name = f"{first_name} {middle_name} {last_name}".strip()
+    position = user.get('position', '')
+    
+    phone = ''
+    mobile = ''
+    for contact in user['contacts']:
+        if contact['type'] == 'phone':
+            if contact['label'] == 'mobile':
+                mobile = contact['number']
+            else:
+                phone = contact['value']
+    
+    # Create mapping of field names to values
+    field_mapping = {
+        'first': first_name,
+        'middle': middle_name,
+        'name': full_name,
+        'position': position,
+        'mail': primary_email,
+        'telephone': phone,
+        'mobile': mobile,
+        'department': department
+    }
+    
+    # First, substitute all variables
+    substituted = template
+    for field, value in field_mapping.items():
+        substituted = substituted.replace(f'{{{{{field}}}}}', value)
+    
+    # Remove sections with empty values using regex
+    # Pattern to match HTML elements containing only empty variables
+    patterns_to_remove = [
+        # Remove divs with only empty content
+        r'<div[^>]*>\s*{{[^}]+}}\s*</div>',
+        # Remove paragraphs with only empty content  
+        r'<p[^>]*>\s*{{[^}]+}}\s*</p>',
+        # Remove spans with only empty content
+        r'<span[^>]*>\s*{{[^}]+}}\s*</span>',
+        # Remove blockquotes with only empty content
+        r'<blockquote[^>]*>\s*{{[^}]+}}\s*</blockquote>',
+        # Remove lines with only empty variables
+        r'^\s*{{[^}]+}}\s*$',
+    ]
+    
+    for pattern in patterns_to_remove:
+        substituted = re.sub(pattern, '', substituted, flags=re.MULTILINE | re.IGNORECASE)
+    
+    # Additional cleanup for empty content after substitution
+    # Remove lines that contain only empty values or whitespace
+    lines = substituted.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        # Check if line contains only empty variables or whitespace
+        if re.match(r'^\s*$', line):
+            # Keep empty lines for formatting
+            if cleaned_lines and cleaned_lines[-1].strip():
+                cleaned_lines.append('')
+        elif re.search(r'^\s*<[^>]*>\s*</[^>]*>\s*$', line):
+            # Remove empty HTML tags
+            continue
+        elif re.search(r'^\s*<[^>]*>\s*:\s*</[^>]*>\s*$', line):
+            # Remove lines with only colons (empty field values)
+            continue
+        elif re.search(r'^\s*<[^>]*>\s*:\s*$', line):
+            # Remove lines with only colons (empty field values)
+            continue
+        else:
+            cleaned_lines.append(line)
+    
+    substituted = '\n'.join(cleaned_lines)
+    
+    # Final pass: remove any remaining empty blockquotes or divs
+    substituted = re.sub(r'<blockquote[^>]*>\s*<div[^>]*>\s*[^<]*:\s*</div>\s*</blockquote>', '', substituted, flags=re.MULTILINE | re.IGNORECASE)
+    substituted = re.sub(r'<div[^>]*>\s*[^<]*:\s*</div>', '', substituted, flags=re.MULTILINE | re.IGNORECASE)
+    
+    # Remove empty divs that might be left
+    substituted = re.sub(r'<div[^>]*>\s*</div>', '', substituted, flags=re.MULTILINE | re.IGNORECASE)
+    
+    # Clean up empty lines and extra whitespace
+    lines = substituted.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        # Skip lines that are only whitespace or empty
+        if line.strip():
+            cleaned_lines.append(line)
+        elif cleaned_lines and cleaned_lines[-1].strip():
+            # Keep one empty line between content
+            cleaned_lines.append('')
+    
+    # Remove trailing empty lines
+    while cleaned_lines and not cleaned_lines[-1].strip():
+        cleaned_lines.pop()
+    
+    return '\n'.join(cleaned_lines)
+
+def set_user_signature(settings: "SettingParams", user: dict, signature_text: str, default_email: str):
+    """
+    Set email signature for user via API
+    """
+    logger.info(f"Setting signature for user {user['id']} ({user['nickname']})...")
+    
+    url = f"{DEFAULT_360_API_URL}/admin/v1/org/{settings.org_id}/mail/users/{user['id']}/settings/sender_info"
+    headers = {"Authorization": f"OAuth {settings.oauth_token}"}
+    
+    # Prepare signature data
+    signature_data = {
+        "signs": [
+            {
+                "emails": [default_email],
+                "isDefault": settings.email_signature_is_default,
+                "text": signature_text,
+                "lang": settings.email_signature_language
+            }
+        ],
+        "signPosition": "bottom"
+    }
+    
+    try:
+        retries = 1
+        while True:
+            logger.debug(f"POST url - {url}")
+            response = requests.post(url, headers=headers, json=signature_data)
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id', '')}")
+            
+            if response.status_code != HTTPStatus.OK.value:
+                logger.error(f"Error during POST request for user {user['id']}: {response.status_code}. Error message: {response.text}")
+                if retries < MAX_RETRIES:
+                    logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
+                    time.sleep(RETRIES_DELAY_SEC * retries)
+                    retries += 1
+                else:
+                    logger.error(f"Error. Setting signature for user {user['id']} ({user['nickname']}) failed.")
+                    return False
+            else:
+                logger.info(f"Successfully set signature for user {user['id']} ({user['nickname']})")
+                return True
+    except requests.exceptions.RequestException as e:
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+        return False
+
+def set_email_signature(settings: "SettingParams"):
+    """
+    Main function to set email signatures for users from file
+    """
+    console.clear()
+    clear_screen()
+    
+    # Create header
+    header_panel = Panel(
+        "[bold blue]📧 Set Email Signatures[/bold blue]",
+        title="[bold green]Email Signature Setup[/bold green]",
+        border_style="green",
+        padding=(1, 2)
+    )
+    console.print(header_panel)
+    
+    # Get input file path
+    while True:
+        input_file = Prompt.ask(
+            "[bold yellow]Enter path to users file (CSV format)[/bold yellow]",
+            default=settings.email_signature_input_file
+        )
+        if not os.path.isfile(input_file):
+            console.print(f"[bold red]❌ File '{input_file}' does not exist. Please try again.[/bold red]")
+            continue
+        break
+    
+    # Get  template file path
+    while True:
+        template_file = Prompt.ask(
+            "[bold yellow]Enter path to signature template file[/bold yellow]",
+            default=settings.email_signature_template_file
+        )
+        if not os.path.isfile(template_file):
+            console.print(f"[bold red]❌ File '{template_file}' does not exist. Please try again.[/bold red]")
+            continue
+        break
+    
+    # Read users from file
+    with console.status("[bold green]Reading users from file..."):
+        users_data = read_users_from_file(input_file)
+    
+    if users_data is None:
+        console.print("[bold red]❌ Failed to read users file.[/bold red]")
+        return
+    
+    if not users_data:
+        console.print("[bold yellow]⚠️ No users found in file.[/bold yellow]")
+        return
+    
+    console.print(f"[bold green]✅ Found {len(users_data)} users in file.[/bold green]")
+    
+    # Validate users
+    with console.status("[bold green]Validating users..."):
+        problematic_lines = validate_users(settings, users_data)
+    
+    if problematic_lines:
+        console.print("\n[bold red]❌ Found problematic lines:[/bold red]")
+        for line_data in problematic_lines:
+            console.print(f"[bold red]Line {line_data['line_num']}: {line_data['search_term']} - {line_data['error']}[/bold red]")
+        
+        console.print("\n[bold yellow]Please fix the problematic lines and try again.[/bold yellow]")
+        console.print("\n[bold cyan]Press Enter to continue...[/bold cyan]")
+        input()
+        return
+    
+    console.print("[bold green]✅ All users validated successfully.[/bold green]")
+    
+    # Load template
+    with console.status("[bold green]Loading signature template..."):
+        template = load_signature_template(template_file)
+    
+    if not template:
+        console.print("[bold red]❌ Failed to load signature template.[/bold red]")
+        return
+    
+    console.print("[bold green]✅ Signature template loaded.[/bold green]")
+    
+    # Show preview
+    console.print("\n[bold cyan]📋 Preview of signature template:[/bold cyan]")
+    console.print(Panel(template[:1000] + "..." if len(template) > 1000 else template, 
+                       title="Template Preview", border_style="blue"))
+    
+    # Ask for confirmation
+    if not Confirm.ask("[bold yellow]Do you want to proceed with setting signatures for {len(users_data)} users?[/bold yellow]"):
+        console.print("[bold yellow]Operation cancelled.[/bold yellow]")
+        return
+    
+    # Set signatures
+    success_count = 0
+    error_count = 0
+
+    deps = get_all_api360_departments(settings)
+    
+    with console.status("[bold green]Setting signatures..."):
+        for user_data in users_data:
+            user = user_data['user']
+
+            primary_email = get_default_email(settings, user['id'])['defaultFrom']
+            if not primary_email:
+                primary_email = user['email']
+            # Substitute template variables
+            signature_text = substitute_template_variables(template, user, deps, primary_email)
+            
+            # Set signature
+            if set_user_signature(settings, user, signature_text, primary_email):
+                success_count += 1
+                logger.info(f"✅ Successfully set signature for {user['nickname']}")
+            else:
+                error_count += 1
+                logger.error(f"❌ Failed to set signature for {user['nickname']}")
+    
+    # Show results
+    console.print(f"\n[bold green]✅ Successfully set signatures for {success_count} users.[/bold green]")
+    if error_count > 0:
+        console.print(f"[bold red]❌ Failed to set signatures for {error_count} users.[/bold red]")
+    
+    # Wait for user input before returning to menu
+    console.print("\n[bold cyan]Press Enter to continue...[/bold cyan]")
+    input()
+
+def get_all_api360_departments(settings: "SettingParams"):
+    logger.info("Получение всех подразделений организации из API...")
+    url = f'{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/departments'
+    headers = {"Authorization": f"OAuth {settings.oauth_token}"}
+
+    has_errors = False
+    departments = []
+    current_page = 1
+    last_page = 1
+    while current_page <= last_page:
+        params = {'page': current_page, 'perPage': DEPARTMENTS_PER_PAGE_FROM_API}
+        try:
+            retries = 1
+            while True:
+                logger.debug(f"GET URL - {url}")
+                response = requests.get(url, headers=headers, params=params)
+                logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
+                if response.status_code != HTTPStatus.OK.value:
+                    logger.error(f"!!! ОШИБКА !!! при GET запросе url - {url}: {response.status_code}. Сообщение об ошибке: {response.text}")
+                    if retries < MAX_RETRIES:
+                        logger.error(f"Повторная попытка ({retries+1}/{MAX_RETRIES})")
+                        time.sleep(RETRIES_DELAY_SEC * retries)
+                        retries += 1
+                    else:
+                        has_errors = True
+                        break
+                else:
+                    for deps in response.json()['departments']:
+                        departments.append(deps)
+                    logger.debug(f"Загружено {len(response.json()['departments'])} подразделений. Текущая страница - {current_page} (всего {last_page} страниц).")
+                    current_page += 1
+                    last_page = response.json()['pages']
+                    break
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"!!! ERROR !!! {type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+            has_errors = True
+            break
+
+        if has_errors:
+            break
+
+    if has_errors:
+        print("Есть ошибки при GET запросах. Возвращается пустой список подразделений.")
+        return []
+    
+    return departments
 
 if __name__ == "__main__":
     # Display startup banner
