@@ -186,6 +186,7 @@ user@company.com
 
 | Переменная | Описание | Источник данных |
 |------------|----------|-----------------|
+| `{{last}}` | Имя | `user.name.last` |
 | `{{first}}` | Имя | `user.name.first` |
 | `{{middle}}` | Отчество | `user.name.middle` |
 | `{{name}}` | Полное имя | `user.name.first + user.name.middle + user.name.last` |

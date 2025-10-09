@@ -1,3 +1,4 @@
+from cProfile import label
 from datetime import datetime
 from dotenv import load_dotenv
 import requests
@@ -3844,7 +3845,8 @@ def substitute_template_variables(template: str, user: dict, deps: list, primary
     mobile = ''
     for contact in user['contacts']:
         if contact['type'] == 'phone':
-            if contact['label'] == 'mobile':
+            label = contact.get('label','')
+            if label and contact['label'] == 'mobile':
                 mobile = contact['number']
             else:
                 phone = contact['value']
@@ -3853,6 +3855,7 @@ def substitute_template_variables(template: str, user: dict, deps: list, primary
     field_mapping = {
         'first': first_name,
         'middle': middle_name,
+        'last': last_name,
         'name': full_name,
         'position': position,
         'mail': primary_email,
