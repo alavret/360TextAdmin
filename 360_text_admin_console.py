@@ -102,6 +102,7 @@ class SettingParams:
     email_signature_language : str
     email_signature_is_default : bool
     email_signature_position : list
+    dry_run : bool
 
 def get_settings():
     exit_flag = False
@@ -134,6 +135,7 @@ def get_settings():
         email_signature_language = os.environ.get("EMAIL_SIGNATURE_LANGUAGE", "ru"),
         email_signature_is_default = os.environ.get("EMAIL_SIGNATURE_IS_DEFAULT", "false").lower() == "true",
         email_signature_position = os.environ.get("EMAIL_SIGNATURE_POSITION", "bottom"),
+        dry_run = os.environ.get("DRY_RUN", "false").lower() == "true",
     )
 
     if not settings.scim_token:
@@ -223,6 +225,65 @@ def check_oauth_token(oauth_token, org_id):
         return True
     return False
 
+def validate_domain_name(domain_name: str) -> bool:
+    """
+    Проверяет валидность имени домена.
+    
+    Args:
+        domain_name (str): Имя домена для проверки
+        
+    Returns:
+        bool: True если домен валиден, False в противном случае
+    """
+    if not domain_name or not isinstance(domain_name, str):
+        return False
+    
+    # Удаляем пробелы в начале и конце
+    domain_name = domain_name.strip()
+    
+    # Проверяем базовые требования
+    if len(domain_name) == 0 or len(domain_name) > 253:
+        return False
+    
+    # Проверяем, что домен не начинается и не заканчивается точкой или дефисом
+    if domain_name.startswith('.') or domain_name.endswith('.') or \
+       domain_name.startswith('-') or domain_name.endswith('-'):
+        return False
+    
+    # Разбиваем домен на части
+    parts = domain_name.split('.')
+    
+    # Домен должен содержать минимум 2 части (например, example.com)
+    if len(parts) < 2:
+        return False
+    
+    # Проверяем каждую часть домена
+    for part in parts:
+        # Часть не может быть пустой
+        if len(part) == 0:
+            return False
+        
+        # Часть не может начинаться или заканчиваться дефисом
+        if part.startswith('-') or part.endswith('-'):
+            return False
+        
+        # Часть не может быть длиннее 63 символов
+        if len(part) > 63:
+            return False
+        
+        # Часть должна содержать только буквы, цифры и дефисы
+        if not re.match(r'^[А-Яа-яЁёa-zA-Z0-9-]+$', part): 
+            return False
+    
+    # Проверяем, что домен содержит хотя бы одну букву
+    if not re.search(r'[А-Яа-яЁёa-zA-Z]', domain_name):
+        return False
+    
+    # Проверяем общий формат домена с помощью регулярного выражения
+    domain_pattern = r'^(?:[А-Яа-яЁёa-zA-Z0-9](?:[А-Яа-яЁёa-zA-Z0-9-]{0,61}[А-Яа-яЁёa-zA-Z0-9])?\.)*[А-Яа-яЁёa-zA-Z0-9](?:[А-Яа-яЁёa-zA-Z0-9-]{0,61}[А-Яа-яЁёa-zA-Z0-9])?$'
+    
+    return bool(re.match(domain_pattern, domain_name))
+
 def parse_arguments():
     """Парсит позиционные аргументы командной строки."""
     parser = argparse.ArgumentParser(
@@ -285,6 +346,7 @@ def change_SCIM_username_manually(settings: "SettingParams"):
     
     old_value, new_value = value.split()
     single_mode(settings, old_value, new_value)
+    console.input("[dim]Press Enter to continue...[/dim]")
 
 def single_mode(settings: "SettingParams", old_value, new_value):
     with console.status("[bold green]Loading SCIM users...", spinner="dots"):
@@ -307,22 +369,25 @@ def single_mode(settings: "SettingParams", old_value, new_value):
         url = DEFAULT_360_SCIM_API_URL.format(domain_id=settings.domain_id)
         try:
             retries = 1
+            data = json.loads("""   { "Operations":    
+                                        [
+                                            {
+                                            "value": "alias@domain.tld",
+                                            "op": "replace",
+                                            "path": "userName"
+                                            }
+                                        ],
+                                        "schemas": [
+                                            "urn:ietf:params:scim:api:messages:2.0:PatchOp"
+                                        ]
+                                    }""".replace("alias@domain.tld", new_value))
+            
+            logger.debug(f"PATCH URL: {url}/v2/Users/{uid}")
+            logger.debug(f"PATCH DATA: {data}")
             while True:
-                data = json.loads("""   { "Operations":    
-                                            [
-                                                {
-                                                "value": "alias@domain.tld",
-                                                "op": "replace",
-                                                "path": "userName"
-                                                }
-                                            ],
-                                            "schemas": [
-                                                "urn:ietf:params:scim:api:messages:2.0:PatchOp"
-                                            ]
-                                        }""".replace("alias@domain.tld", new_value))
-                
-                logger.debug(f"PATCH URL: {url}/v2/Users/{uid}")
-                logger.debug(f"PATCH DATA: {data}")
+                if settings.dry_run:
+                    logger.info(f"Dry run: Would change userName for user {old_value} to {new_value}")
+                    break
                 response = requests.patch(f"{url}/v2/Users/{uid}", headers=headers, json=data)
                 logger.debug(f"X-Request-Id: {response.headers.get('X-Request-Id','')}")
                 if response.status_code != HTTPStatus.OK.value:
@@ -335,6 +400,7 @@ def single_mode(settings: "SettingParams", old_value, new_value):
                         logger.error(f"Error. Patching user {old_value} to {new_value} failed.")
                         break
                 else:
+                    logger.debug(f"Success! userNane for user {old_value} changed to {new_value}.")
                     console.print(f"[bold green]🎉 Success! User {old_value} changed to {new_value}.[/bold green]")
                     break
 
@@ -342,7 +408,8 @@ def single_mode(settings: "SettingParams", old_value, new_value):
             logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
     else:
         logger.error("List of SCIM users is empty.")
-        console.input("[dim]Press Enter to continue...[/dim]")
+
+    console.input("[dim]Press Enter to continue...[/dim]")
         
 def clear_screen():
         os.system('cls' if os.name == 'nt' else 'clear')
@@ -486,8 +553,10 @@ def submenu_1(settings: "SettingParams"):
         menu_content.append("6. ", style="bold cyan")
         menu_content.append("Check alias for user\n", style="white")
         menu_content.append("7. ", style="bold cyan")
-        menu_content.append("Show user attributes and save their to file\n", style="white")
+        menu_content.append("Delete email addresses in specified domains in contacts for all users with SCIM\n", style="white")
         menu_content.append("8. ", style="bold cyan")
+        menu_content.append("Show user attributes and save their to file\n", style="white")
+        menu_content.append("9. ", style="bold cyan")
         menu_content.append("Download all users to file (SCIM и API) protocols\n\n", style="white")
         menu_content.append("0 or empty string. ", style="bold red")
         menu_content.append("Back to main menu", style="red")
@@ -504,7 +573,7 @@ def submenu_1(settings: "SettingParams"):
         
         choice = Prompt.ask(
             "[bold yellow]Enter your choice[/bold yellow]",
-            choices=["0", "1", "2", "3", "4", "5", "6", "7", "8"],
+            choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
             default="0"
         )
 
@@ -535,8 +604,10 @@ def submenu_1(settings: "SettingParams"):
         elif choice == "6":
             check_alias_prompt(settings)
         elif choice == "7":
-            show_user_attributes_prompt(settings)
+            remove_unlinked_domains_in_scim_prompt(settings)
         elif choice == "8":
+            show_user_attributes_prompt(settings)
+        elif choice == "9":
             download_users_attrib_to_file(settings)
     return
 
@@ -1292,14 +1363,17 @@ def change_nickname(settings: "SettingParams", old_value: str, new_value: str):
     logger.debug(f"PATCH URL: {url}")
     logger.debug(f"PATCH DATA: {raw_data}")
     try:
-        response = requests.patch(url, headers=headers, data=json.dumps(raw_data))
-        logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
-        if response.ok:
-            logger.info(f"Nickname of user {old_value} changed to {new_value}")
-            time.sleep(SLEEP_TIME_BETWEEN_API_CALLS)
+        if settings.dry_run:
+            logger.info(f"Dry run: Would change nickname of user {old_value} to {new_value}")
         else:
-            logger.error(f"Error ({response.status_code}) changing nickname of user {old_value} to {new_value}: {response.text}")
-            return
+            response = requests.patch(url, headers=headers, data=json.dumps(raw_data))
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
+            if response.ok:
+                logger.info(f"Nickname of user {old_value} changed to {new_value}")
+                time.sleep(SLEEP_TIME_BETWEEN_API_CALLS)
+            else:
+                logger.error(f"Error ({response.status_code}) changing nickname of user {old_value} to {new_value}: {response.text}")
+                return
 
     except requests.exceptions.RequestException as e:
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
@@ -1322,6 +1396,9 @@ def remove_alias_by_api360(settings: "SettingParams", user_id: str, alias: str):
         logger.debug(f"DELETE URL: {url}")
         
         while True:
+            if settings.dry_run:
+                logger.info(f"Dry run: Would remove alias {alias} in _API360_ user {user_id}")
+                break
             response = requests.delete(url, headers=headers)
             logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
@@ -1371,6 +1448,9 @@ def remove_alias_in_scim(user_id: str, alias: str):
                     
                     logger.debug(f"PATCH URL: {url}/v2/Users/{user_id}")
                     logger.debug(f"PATCH DATA: {data}")
+                    if settings.dry_run:
+                        logger.info(f"Dry run: Would remove alias {alias} in _SCIM_ user {user_id}")
+                        return
                     response = requests.patch(f"{url}/v2/Users/{user_id}", headers=headers, data=json.dumps(data))
                     logger.debug(f"X-Request-Id: {response.headers.get('X-Request-Id','')}")
                     if response.ok:
@@ -1420,6 +1500,9 @@ def remove_email_in_scim(user_id: str, alias: str):
                 
                 logger.debug(f"PATCH URL: {url}/v2/Users/{user_id}")
                 logger.debug(f"PATCH DATA: {data}") 
+                if settings.dry_run:
+                    logger.info(f"Dry run: Would remove alias {alias} from email contacts in _SCIM_ user {user_id}")
+                    return
                 response = requests.patch(f"{url}/v2/Users/{user_id}", headers=headers, data=json.dumps(data))
                 logger.debug(f"X-Request-Id: {response.headers.get('X-Request-Id','')}")
                 if response.ok:
@@ -1429,6 +1512,126 @@ def remove_email_in_scim(user_id: str, alias: str):
                     logger.error(f"Error ({response.status_code}) removing alias {alias} from email contacts in _SCIM_ user {user_id}: {response.text}")
     except requests.exceptions.RequestException as e:
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+
+def remove_unlinked_domains_in_scim_emails_for_all_users(settings: "SettingParams", domains: list[str]):
+    logger.info(f"Removing email with domain {','.join(domains)} in _SCIM_ users.")
+    url = DEFAULT_360_SCIM_API_URL.format(domain_id=settings.domain_id) 
+    headers = {"Authorization": f"Bearer {settings.scim_token}"}
+    try:
+        
+        found_domains = False
+        users = get_all_scim_users(settings)
+        if not users:
+            logger.error("No users found from SCIM calls. Check your settings.")
+            return
+        for user in users:
+            new_emails= []
+            temp = {}
+            for email in user['emails']:
+                if email['value'].split('@')[1].lower() not in domains:
+                    temp['primary'] = email['primary']
+                    if len(email.get("type",'')) > 0:
+                        temp['type'] = email['type']
+                    temp['value'] = email['value']
+                    new_emails.append(temp)
+                else:
+                    found_domains = True
+            if not found_domains:
+                continue
+            
+            if found_domains:
+                logger.debug(f"User {user['id']} has email with domains {','.join(domains)}. Removing this email.")
+                data = json.loads("""   { "Operations":    
+                                            [
+                                                {
+                                                "value": _data_,
+                                                "op": "replace",
+                                                "path": "emails"
+                                                }
+                                            ],
+                                            "schemas": [
+                                                "urn:ietf:params:scim:api:messages:2.0:PatchOp"
+                                            ]
+                                        }""".replace("_data_", json.dumps(new_emails)))
+                
+                logger.debug(f"PATCH URL: {url}/v2/Users/{user['id']}")
+                logger.debug(f"PATCH DATA: {data}") 
+
+                retries = 1
+                while True:
+                    if settings.dry_run:
+                        logger.info(f"Dry run: Would remove email with domains {','.join(domains)} from email contacts in _SCIM_ user {user['id']}")
+                        break
+                    response = requests.patch(f"{url}/v2/Users/{user['id']}", headers=headers, data=json.dumps(data))
+                    logger.debug(f"X-Request-Id: {response.headers.get('X-Request-Id','')}")
+                    if response.status_code != HTTPStatus.OK.value:
+                        logger.error(f"Error during PATCH request: {response.status_code}. Error message: {response.text}")
+                        if retries < MAX_RETRIES:
+                            logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
+                            time.sleep(RETRIES_DELAY_SEC * retries)
+                            retries += 1
+                        else:
+                            logger.error(f"Error ({response.status_code}) removing email with domains {','.join(domains)} from email contacts in _SCIM_ user {user['id']}: {response.text}")
+                            break
+                    else:
+                            logger.info(f"Email with domains {','.join(domains)} removed from email contacts in _SCIM_ user {user['id']}")
+                            time.sleep(SLEEP_TIME_BETWEEN_API_CALLS)
+                            break
+    except Exception as e:
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+
+def remove_unlinked_domains_in_scim_prompt(settings: "SettingParams"):
+    console.clear()
+    clear_screen()
+
+    if settings.skip_scim_api_call:
+        console.print("[red]SCIM API is disabled. Operation cancelled.[/red]")
+        console.input("[dim]Press Enter to continue...[/dim]")
+        return
+
+    console.print(Panel(
+        "[bold blue]Enter unlinked domains, separated by comma or press Enter to cancel[/bold blue]\n",
+        title="[green]Delete unlinked domains in SCIM emails[/green]",
+        border_style="blue"
+    ))
+    
+    while True:
+        stop_flag = False
+        target_domains = []
+        answer = Prompt.ask(
+            "[bold yellow]Domains to delete:[/bold yellow]",
+            default=""
+        )
+        if not answer.strip():
+            break
+        else:
+            pattern = r'[;,\s]+'
+            domains = re.split(pattern, answer)
+            if not isinstance(domains, list):
+                domains = [domains]
+            for domain in domains:
+                if not validate_domain_name(domain):
+                    console.print(f"[red]Domain {domain} is not valid. Fix it.[/red]")
+                    stop_flag = True
+                    continue
+                else:
+                    target_domains.append(domain)
+            if not target_domains or stop_flag:
+                console.print("[yellow]Operation cancelled.[/yellow]")
+                console.print("\n")
+                continue
+            else:
+                target_domains = [domain.lower() for domain in target_domains]
+                if not Confirm.ask(f"[bold yellow]Delete unlinked domains {','.join(target_domains)} for all users?[/bold yellow]"):
+                    console.print("[yellow]Operation cancelled by user.[/yellow]")
+                    console.print("\n")
+                    continue
+                else:
+                    remove_unlinked_domains_in_scim_emails_for_all_users(settings, target_domains)
+                    console.print("[green]Unlinked domains deleted.[/green]")
+                    console.input("[dim]Press Enter to continue...[/dim]")
+                    break
+
 
 def create_SCIM_userName_file(settings: "SettingParams", onlyList = False):
 
@@ -1502,23 +1705,26 @@ def update_users_from_SCIM_userName_file(settings: "SettingParams"):
         uid, displayName, old_userName, new_userName = user.strip().split(";")
         try:
             retries = 1
+            logger.info(f"Changing user {old_userName} to {new_userName}...")
+            data = json.loads("""   { "Operations":    
+                                        [
+                                            {
+                                            "value": "alias@domain.tld",
+                                            "op": "replace",
+                                            "path": "userName"
+                                            }
+                                        ],
+                                        "schemas": [
+                                            "urn:ietf:params:scim:api:messages:2.0:PatchOp"
+                                        ]
+                                    }""".replace("alias@domain.tld", new_userName))
+            
+            logger.debug(f"PATCH URL: {url}/v2/Users/{uid}")
+            logger.debug(f"PATCH DATA: {data}")
             while True:
-                logger.info(f"Changing user {old_userName} to {new_userName}...")
-                data = json.loads("""   { "Operations":    
-                                            [
-                                                {
-                                                "value": "alias@domain.tld",
-                                                "op": "replace",
-                                                "path": "userName"
-                                                }
-                                            ],
-                                            "schemas": [
-                                                "urn:ietf:params:scim:api:messages:2.0:PatchOp"
-                                            ]
-                                        }""".replace("alias@domain.tld", new_userName))
-                
-                logger.debug(f"PATCH URL: {url}/v2/Users/{uid}")
-                logger.debug(f"PATCH DATA: {data}")
+                if settings.dry_run:
+                    logger.info(f"Dry run: Would change userName for user {old_userName} to {new_userName}")
+                    break
                 response = requests.patch(f"{url}/v2/Users/{uid}", headers=headers, json=data)
                 logger.debug(f"X-Request-Id: {response.headers.get('X-Request-Id','')}")
                 if response.status_code != HTTPStatus.OK.value:
@@ -1539,6 +1745,10 @@ def update_users_from_SCIM_userName_file(settings: "SettingParams"):
             logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
 
 def show_user_attributes_prompt(settings: "SettingParams"):
+
+    console.clear()
+    clear_screen()
+
     console.print(Panel(
         "[bold blue]Show User Attributes[/bold blue]\n"
         "Enter target user in one of these formats:\n"
@@ -1582,6 +1792,7 @@ def show_user_attributes(settings: "SettingParams", answer: str):
             return
 
     found_last_name_user = []
+    double_users_flag = False
     for searched in search_users:
         found_flag = False
         target_user = None
@@ -2317,13 +2528,16 @@ def default_email_update_from_file(settings: "SettingParams"):
                 continue   
             else:
                 logger.info(f"Changing user {uid} with alias {alias}: {data['fromName']} ({data['defaultFrom']}) to {user['new_DisplayName']} ({user['new_DefaultEmail']})...")
+            if change_name:
+                data['fromName'] = user['new_DisplayName'].strip()
+            if change_mail:
+                data['defaultFrom'] = user['new_DefaultEmail'].strip()
+            logger.debug(f"POST URL: {url}/{uid}/settings/sender_info")
+            logger.debug(f"POST DATA: {data}")
             while True:
-                if change_name:
-                    data['fromName'] = user['new_DisplayName'].strip()
-                if change_mail:
-                    data['defaultFrom'] = user['new_DefaultEmail'].strip()
-                logger.debug(f"POST URL: {url}/{uid}/settings/sender_info")
-                logger.debug(f"POST DATA: {data}")
+                if settings.dry_run:
+                    logger.info(f"Dry run: Would change email configuration for user {uid} with alias {alias} to {user['new_DisplayName']} ({user['new_DefaultEmail']})")
+                    break
                 response = requests.post(f"{url}/{uid}/settings/sender_info", headers=headers, json=data)
                 logger.debug(f"x-request-id: {response.headers.get('X-Request-Id','')}")
                 if response.status_code != HTTPStatus.OK.value:
@@ -2699,9 +2913,12 @@ def send_perm_call_api(settings: "SettingParams", users_to_change, mode, shared_
         return return_value
     try:
         retries = 1
+        logger.debug(f"POST url: {url}")
+        logger.debug(f"Raw POST JSON: {json.dumps(data)})")
         while True:
-            logger.debug(f"POST url: {url}")
-            logger.debug(f"Raw POST JSON: {json.dumps(data)})")
+            if settings.dry_run:
+                logger.info(f"Dry run: Would change send permissions for group {settings.target_group['name']} ({settings.target_group['id']}, {settings.target_group['emailId']})")
+                break
             response = requests.post(url, headers=headers, json=data)
             logger.debug(f"Yandex-Cloud-Request-ID: {response.headers.get('Yandex-Cloud-Request-ID', '')}")
             if not (response.status_code == 200 or response.status_code == 204):
@@ -3019,7 +3236,9 @@ def clear_forward_rule_by_api(settings: "SettingParams", user, ruleId):
     try:
         retries = 1
         while True:
-            
+            if settings.dry_run:
+                logger.info(f"Dry run: Would clear forward rule {ruleId} for user {user['id']} ({user['nickname']})")
+                break
             response = requests.delete(url, headers=headers)
             logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
@@ -3327,6 +3546,9 @@ def mfa_reset_personal_phone(settings: "SettingParams", user: dict):
         headers = {"Authorization": f"OAuth {settings.oauth_token}"}
         logger.debug(f"DELETE URL: {url}")
         while True:
+            if settings.dry_run:
+                logger.info(f"Dry run: Would delete security phone for user {user['id']} ({user['nickname']})")
+                break
             response = requests.delete(url, headers=headers)
             logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
@@ -3377,6 +3599,9 @@ def mfa_logout_single_user(settings: "SettingParams", user: dict):
         headers = {"Authorization": f"OAuth {settings.oauth_token}"}
         logger.debug(f"PUT URL: {url}")
         while True:
+            if settings.dry_run:
+                logger.info(f"Dry run: Would logout user {user['id']} ({user['nickname']}) from Yandex 360 services.")
+                break
             response = requests.put(url, headers=headers)
             logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
@@ -3692,6 +3917,11 @@ def get_email_signature(settings: "SettingParams"):
     """
     console.clear()
     clear_screen()
+
+
+
+
+    
     
     # Create header
     header_panel = Panel(
@@ -3959,8 +4189,11 @@ def set_user_signature(settings: "SettingParams", user: dict, signature_text: st
     
     try:
         retries = 1
+        logger.debug(f"POST url - {url}")
         while True:
-            logger.debug(f"POST url - {url}")
+            if settings.dry_run:
+                logger.info(f"Dry run: Would set signature for user {user['id']} ({user['nickname']})")
+                break
             response = requests.post(url, headers=headers, json=signature_data)
             logger.debug(f"x-request-id: {response.headers.get('x-request-id', '')}")
             
