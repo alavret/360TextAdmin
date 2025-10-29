@@ -40,6 +40,7 @@ LOG_FILE = "360_text_admin_console.log"
 RETRIES_DELAY_SEC = 2
 SLEEP_TIME_BETWEEN_API_CALLS = 0.5
 ALL_USERS_REFRESH_IN_MINUTES = 15
+ALL_SCIM_USERS_REFRESH_IN_MINUTES = 5
 # MAX value is 1000
 USERS_PER_PAGE_FROM_API = 1000
 # MAX value is 1000
@@ -88,6 +89,8 @@ class SettingParams:
     target_group : dict
     all_users : list
     all_users_get_timestamp : datetime
+    all_scim_users : list
+    all_scim_users_get_timestamp : datetime
     forward_rules_output_file : str
     shared_mailboxes : list
     shared_mailboxes_get_timestamp : datetime
@@ -125,6 +128,8 @@ def get_settings():
         target_group = {},
         all_users = [],
         all_users_get_timestamp = datetime.now(),
+        all_scim_users = [],
+        all_scim_users_get_timestamp = datetime.now(),
         shared_mailboxes = [],
         shared_mailboxes_get_timestamp = datetime.now(),
         all_groups = [],
@@ -281,8 +286,88 @@ def validate_domain_name(domain_name: str) -> bool:
     
     # Проверяем общий формат домена с помощью регулярного выражения
     domain_pattern = r'^(?:[А-Яа-яЁёa-zA-Z0-9](?:[А-Яа-яЁёa-zA-Z0-9-]{0,61}[А-Яа-яЁёa-zA-Z0-9])?\.)*[А-Яа-яЁёa-zA-Z0-9](?:[А-Яа-яЁёa-zA-Z0-9-]{0,61}[А-Яа-яЁёa-zA-Z0-9])?$'
-    
+
     return bool(re.match(domain_pattern, domain_name))
+
+
+def match_email_with_template(template: str, email: str) -> bool:
+    """
+    Проверяет, соответствует ли email адрес заданному шаблону с поддержкой wildcard символов *.
+
+    Args:
+        template (str): Шаблон для поиска (domain.com или alias@domain.com с возможными *)
+        email (str): Email адрес для проверки
+
+    Returns:
+        bool: True если email соответствует шаблону, False в противном случае
+
+    Examples:
+        *@domain.com - все адреса в домене domain.com
+        *.domain.com - все адреса в любом домене третьего уровня в домене domain.com
+        andy@* - все адреса с алисом andy в любом домене
+    """
+    if not template or not email:
+        return False
+
+    template = template.lower().strip()
+    email = email.lower().strip()
+
+    # Разбиваем email на локальную часть и домен
+    if '@' not in email:
+        return False
+    email_local, email_domain = email.split('@', 1)
+
+    # Проверяем формат шаблона
+    if '@' in template:
+        # Шаблон в формате alias@domain
+        if template.count('@') != 1:
+            return False
+        template_local, template_domain = template.split('@', 1)
+
+        # Сравниваем локальные части с wildcard поддержкой
+        if not match_with_wildcard(template_local, email_local):
+            return False
+
+        # Сравниваем домены с wildcard поддержкой
+        if not match_with_wildcard(template_domain, email_domain):
+            return False
+
+    else:
+        # Шаблон в формате только домен
+        if not match_with_wildcard(template, email_domain):
+            return False
+
+    return True
+
+
+def match_with_wildcard(pattern: str, text: str) -> bool:
+    """
+    Сравнивает текст с шаблоном, поддерживающим wildcard символ *.
+
+    Args:
+        pattern (str): Шаблон с возможными *
+        text (str): Текст для сравнения
+
+    Returns:
+        bool: True если текст соответствует шаблону
+    """
+    if not pattern or not text:
+        return False
+
+    # Экранируем специальные символы regex, кроме *
+    escaped = re.escape(pattern)
+    # Заменяем экранированные * на .*
+    wildcard_pattern = escaped.replace(r'\*', '.*')
+
+    # Добавляем якоря начала и конца строки
+    regex_pattern = f'^{wildcard_pattern}$'
+
+    try:
+        return bool(re.match(regex_pattern, text, re.IGNORECASE))
+    except re.error:
+        # Если regex невалиден, возвращаем False
+        return False
+
 
 def parse_arguments():
     """Парсит позиционные аргументы командной строки."""
@@ -553,7 +638,7 @@ def submenu_1(settings: "SettingParams"):
         menu_content.append("6. ", style="bold cyan")
         menu_content.append("Check alias for user\n", style="white")
         menu_content.append("7. ", style="bold cyan")
-        menu_content.append("Delete email addresses in specified domains in contacts for all users with SCIM\n", style="white")
+        menu_content.append("Delete email addresses in specified domains in contacts for selected users with SCIM\n", style="white")
         menu_content.append("8. ", style="bold cyan")
         menu_content.append("Show user attributes and save their to file\n", style="white")
         menu_content.append("9. ", style="bold cyan")
@@ -604,7 +689,12 @@ def submenu_1(settings: "SettingParams"):
         elif choice == "6":
             check_alias_prompt(settings)
         elif choice == "7":
-            remove_unlinked_domains_in_scim_prompt(settings)
+            if settings.skip_scim_api_call:
+                console.print("[bold red]⚠️  No SCIM config found. Skip action.[/bold red]")
+                console.input("[dim]Press Enter to continue...[/dim]")
+            else:
+                remove_contacts_in_scim_prompt(settings)
+            
         elif choice == "8":
             show_user_attributes_prompt(settings)
         elif choice == "9":
@@ -1125,7 +1215,22 @@ def get_default_email(settings: "SettingParams", userId: str):
         return []
     return data
 
-def get_all_scim_users(settings: "SettingParams"):
+def get_all_scim_users(settings: "SettingParams", force = False):
+    if not force:
+        logger.info("Getting all users of the organisation from cache...")
+
+    if not settings.all_scim_users or force:
+        logger.info("Getting all users of the organisation from SCIM API...")
+        settings.all_scim_users = get_all_scim_users_from_api(settings)
+        settings.all_scim_users_get_timestamp = datetime.now()
+    else:
+        if (datetime.now() - settings.all_scim_users_get_timestamp).total_seconds() > ALL_SCIM_USERS_REFRESH_IN_MINUTES * 60:
+            logger.info("Getting all users of the organisation from SCIM API...")
+            settings.all_scim_users = get_all_scim_users_from_api(settings)
+            settings.all_scim_users_get_timestamp = datetime.now()
+    return settings.all_scim_users
+
+def get_all_scim_users_from_api(settings: "SettingParams"):
     
     if settings.skip_scim_api_call:
         logger.info("No SCIM config found. Skip getting all users of the organisation from SCIM action.")
@@ -1142,7 +1247,7 @@ def get_all_scim_users(settings: "SettingParams"):
     try:
         retries = 1
         while True:  
-            logger.debug(f"GET url - {url}")         
+            logger.debug(f"GET url - {url}/v2/Users?startIndex={startIndex}&count={items}")         
             response = requests.get(f"{url}/v2/Users?startIndex={startIndex}&count={items}", headers=headers)
             logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
@@ -1580,7 +1685,91 @@ def remove_unlinked_domains_in_scim_emails_for_all_users(settings: "SettingParam
     except Exception as e:
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
 
-def remove_unlinked_domains_in_scim_prompt(settings: "SettingParams"):
+
+def remove_emails_matching_templates_in_scim(settings: "SettingParams", templates: list[str], users: list[str], show_only = False, force_SCIM_call = True):
+    logger.info(f"Removing emails matching templates {','.join(templates)} in _SCIM_ users.")
+    url = DEFAULT_360_SCIM_API_URL.format(domain_id=settings.domain_id)
+    headers = {"Authorization": f"Bearer {settings.scim_token}"}
+    try:
+        scim_users = get_all_scim_users(settings, force_SCIM_call)
+        if not scim_users:
+            logger.error("No users found from SCIM calls. Check your settings.")
+            return
+        found_matching_emails = False
+        api_users_ids = [user['id'] for user in users]
+        for user in scim_users:
+            if user['id'] not in api_users_ids:
+                continue
+            new_emails= []
+            temp = {}
+            emails_to_remove = []
+            for email in user['emails']:
+                email_matches_template = False
+                for template in templates:
+                    if match_email_with_template(template, email['value']):
+                        email_matches_template = True
+                        emails_to_remove.append(email['value'])
+                        break
+
+                if not email_matches_template:
+                    temp['primary'] = email['primary']
+                    if len(email.get("type",'')) > 0:
+                        temp['type'] = email['type']
+                    temp['value'] = email['value']
+                    new_emails.append(temp)
+                else:
+                    found_matching_emails = True
+
+            if not found_matching_emails:
+                continue
+
+            if found_matching_emails and emails_to_remove:
+                if show_only:
+                    for email in emails_to_remove:
+                        logger.info(f"User {user['id']} ({user['userName']}) has email to remove: {email} matching templates {','.join(templates)}")
+                    continue
+                logger.debug(f"User {user['id']} ({user['userName']}) has emails matching templates {','.join(templates)}. Removing emails: {','.join(emails_to_remove)}")
+                data = json.loads("""   { "Operations":
+                                            [
+                                                {
+                                                "value": _data_,
+                                                "op": "replace",
+                                                "path": "emails"
+                                                }
+                                            ],
+                                            "schemas": [
+                                                "urn:ietf:params:scim:api:messages:2.0:PatchOp"
+                                            ]
+                                        }""".replace("_data_", json.dumps(new_emails)))
+
+                logger.debug(f"PATCH URL: {url}/v2/Users/{user['id']}")
+                logger.debug(f"PATCH DATA: {data}")
+
+                retries = 1
+                while True:
+                    if settings.dry_run:
+                        logger.info(f"Dry run: Would remove emails matching templates {','.join(templates)} from email contacts in _SCIM_ user {user['id']}: {','.join(emails_to_remove)}")
+                        break
+                    response = requests.patch(f"{url}/v2/Users/{user['id']}", headers=headers, data=json.dumps(data))
+                    logger.debug(f"X-Request-Id: {response.headers.get('X-Request-Id','')}")
+                    if response.status_code != HTTPStatus.OK.value:
+                        logger.error(f"Error during PATCH request: {response.status_code}. Error message: {response.text}")
+                        if retries < MAX_RETRIES:
+                            logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
+                            time.sleep(RETRIES_DELAY_SEC * retries)
+                            retries += 1
+                        else:
+                            logger.error(f"Error ({response.status_code}) removing emails matching templates {','.join(templates)} from email contacts in _SCIM_ user {user['id']}: {response.text}")
+                            break
+                    else:
+                            logger.info(f"Emails matching templates {','.join(templates)} removed from email contacts in _SCIM_ user {user['id']}: {','.join(emails_to_remove)}")
+                            time.sleep(SLEEP_TIME_BETWEEN_API_CALLS)
+                            break
+    except Exception as e:
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+
+
+def remove_contacts_in_scim_prompt(settings: "SettingParams"):
     console.clear()
     clear_screen()
 
@@ -1590,48 +1779,93 @@ def remove_unlinked_domains_in_scim_prompt(settings: "SettingParams"):
         return
 
     console.print(Panel(
-        "[bold blue]Enter unlinked domains, separated by comma or press Enter to cancel[/bold blue]\n",
-        title="[green]Delete unlinked domains in SCIM emails[/green]",
+        "[bold blue]Enter email templates to delete, separated by space, comma or semicolon or press Enter to cancel[/bold blue]\n"
+        "[dim]Templates can be in format domain.com or alias@domain.com with wildcard * support[/dim]\n"
+        "[dim]Examples: *@domain.com, *.domain.com, andy@*[/dim]",
+        title="[green]Delete emails matching templates in SCIM[/green]",
         border_style="blue"
     ))
     
+    break_flag = False
+
     while True:
-        stop_flag = False
-        target_domains = []
-        answer = Prompt.ask(
-            "[bold yellow]Domains to delete:[/bold yellow]",
-            default=""
-        )
-        if not answer.strip():
-            break
-        else:
-            pattern = r'[;,\s]+'
-            domains = re.split(pattern, answer)
-            if not isinstance(domains, list):
-                domains = [domains]
-            for domain in domains:
-                if not validate_domain_name(domain):
-                    console.print(f"[red]Domain {domain} is not valid. Fix it.[/red]")
-                    stop_flag = True
-                    continue
-                else:
-                    target_domains.append(domain)
-            if not target_domains or stop_flag:
-                console.print("[yellow]Operation cancelled.[/yellow]")
-                console.print("\n")
+
+        while True:
+            users_to_add = []
+            double_users_flag = False
+            break_flag, double_users_flag, users_to_add = find_users_prompt(settings)
+
+            if break_flag:
+                break
+            
+            if double_users_flag:
                 continue
-            else:
-                target_domains = [domain.lower() for domain in target_domains]
-                if not Confirm.ask(f"[bold yellow]Delete unlinked domains {','.join(target_domains)} for all users?[/bold yellow]"):
-                    console.print("[yellow]Operation cancelled by user.[/yellow]")
+
+            if not users_to_add:
+                logger.info("No users to add. Try again.")
+                continue
+
+            console.print(f"[green]Found {len(users_to_add)} users to delete emails from.[/green]")
+            console.print("\n")
+            break
+
+        if break_flag:
+            break
+        
+        while True:
+            target_templates = []
+            answer = Prompt.ask(
+                "[bold yellow]Email templates to delete:[/bold yellow]",
+                default=""
+            )
+            if not answer.strip():
+                break_flag = True
+                break
+
+            pattern = r'[;,\s]+'
+            templates = re.split(pattern, answer)
+            if not isinstance(templates, list):
+                templates = [templates]
+            for template in templates:
+                template = template.strip()
+                if not template:
+                    continue
+                # Basic validation - template should not be empty and should contain valid characters
+                if not re.match(r'^[\w\.\-\*@]+$', template):
+                    console.print(f"[red]Template '{template}' contains invalid characters. Only letters, numbers, dots, hyphens, @ and * are allowed. Try again.[/red]")
                     console.print("\n")
                     continue
                 else:
-                    remove_unlinked_domains_in_scim_emails_for_all_users(settings, target_domains)
-                    console.print("[green]Unlinked domains deleted.[/green]")
-                    console.input("[dim]Press Enter to continue...[/dim]")
-                    break
+                    target_templates.append(template)
+            if not target_templates:
+                console.print("[yellow]No templates to delete. Try again.[/yellow]")
+                console.print("\n")
+                continue
+            else:
+                break
 
+        if break_flag:
+            break
+
+        console.print("[green]=======================================================[/green]")
+        console.print("[bold yellow]Next emails will be deleted:[/bold yellow]")
+        remove_emails_matching_templates_in_scim(settings, target_templates, users_to_add, show_only = True, force_SCIM_call = True)
+        console.print("[green]=======================================================[/green]")
+        console.print("\n")
+        if not Confirm.ask(f"[bold yellow]Search and delete emails matching templates {','.join(target_templates)} for {len(users_to_add)} users?[/bold yellow]"):
+            console.print("[yellow]Operation cancelled by user.[/yellow]")
+            console.print("\n")
+        else:
+            remove_emails_matching_templates_in_scim(settings, target_templates, users_to_add, show_only = False, force_SCIM_call = False)
+            console.print("[green]Emails matching templates deleted.[/green]")
+            console.input("[dim]Press Enter to continue...[/dim]")
+
+    if break_flag:
+        console.print("[yellow]Operation cancelled by user.[/yellow]")
+        console.input("[dim]Press Enter to continue...[/dim]")
+        return
+
+    
 
 def create_SCIM_userName_file(settings: "SettingParams", onlyList = False):
 
@@ -3111,67 +3345,70 @@ def forward_rules_clear_for_user(settings: "SettingParams"):
         for user in users_to_clear:
             get_and_clear_forward_rules_by_userid(settings, user)
 
-def find_users_prompt(settings: "SettingParams"):
+def  find_users_prompt(settings: "SettingParams"):
     break_flag = False
     double_users_flag = False
-
+    users_to_add = []
     answer = Prompt.ask(
-        "[bold yellow]Enter users aliases or uid or last name, separated by comma or space[/bold yellow]",
+        "[bold yellow]Enter users aliases or uid or last name, separated by comma or space (* - all users)[/bold yellow]",
         default=""
     )
     if not answer.strip():
         break_flag = True
+    else:
+        users = get_all_api360_users(settings)
+        if not users:
+            logger.info("No users found in Y360 organization.")
+            break_flag = True
 
-    users = get_all_api360_users(settings)
-    if not users:
-        logger.info("No users found in Y360 organization.")
-        break_flag = True
+        if answer.strip() == "*":
+            return break_flag, double_users_flag, users
 
-    pattern = r'[;,\s]+'
-    search_users = re.split(pattern, answer)
-    users_to_add = []
-    #rus_pattern = re.compile('[-А-Яа-яЁё]+')
-    #anti_rus_pattern = r'[^\u0400-\u04FF\s]'
+        pattern = r'[;,\s]+'
+        search_users = re.split(pattern, answer)
+        
+        #rus_pattern = re.compile('[-А-Яа-яЁё]+')
+        #anti_rus_pattern = r'[^\u0400-\u04FF\s]'
 
-    for searched in search_users:
-        if "@" in searched.strip():
-            searched = searched.split("@")[0]
-        found_flag = False
-        if all(char.isdigit() for char in searched.strip()):
-            if len(searched.strip()) == 16 and searched.strip().startswith("113"):
+        for searched in search_users:
+            if "@" in searched.strip():
+                searched = searched.split("@")[0]
+            found_flag = False
+            if all(char.isdigit() for char in searched.strip()):
+                if len(searched.strip()) == 16 and searched.strip().startswith("113"):
+                    for user in users:
+                        if user['id'] == searched.strip():
+                            logger.debug(f"User found: {user['nickname']} ({user['id']})")
+                            users_to_add.append(user)
+                            found_flag = True
+                            break
+
+            else:
+                found_last_name_user = []
                 for user in users:
-                    if user['id'] == searched.strip():
+                    aliases_lower_case = [r.lower() for r in user['aliases']]
+                    if user['nickname'].lower() == searched.lower().strip() or searched.lower().strip() in aliases_lower_case:
                         logger.debug(f"User found: {user['nickname']} ({user['id']})")
                         users_to_add.append(user)
                         found_flag = True
                         break
+                    if user['name']['last'].lower() == searched.lower().strip():
+                        found_last_name_user.append(user)
+                if not found_flag and found_last_name_user:
+                    if len(found_last_name_user) == 1:
+                        logger.debug(f"User found ({searched}): {found_last_name_user[0]['nickname']} ({found_last_name_user[0]['id']}, {found_last_name_user[0]['position']})")
+                        users_to_add.append(found_last_name_user[0])
+                        found_flag = True
+                    else:
+                        logger.error(f"User {searched} found more than one user:")
+                        for user in found_last_name_user:
+                            logger.error(f" - last name {user['name']['last']}, nickname {user['nickname']} ({user['id']}, {user['position']})")
+                        logger.error("Refine your search parameters.")
+                        double_users_flag = True
+                        break
 
-        else:
-            found_last_name_user = []
-            for user in users:
-                aliases_lower_case = [r.lower() for r in user['aliases']]
-                if user['nickname'].lower() == searched.lower().strip() or searched.lower().strip() in aliases_lower_case:
-                    logger.debug(f"User found: {user['nickname']} ({user['id']})")
-                    users_to_add.append(user)
-                    found_flag = True
-                    break
-                if user['name']['last'].lower() == searched.lower().strip():
-                    found_last_name_user.append(user)
-            if not found_flag and found_last_name_user:
-                if len(found_last_name_user) == 1:
-                    logger.debug(f"User found ({searched}): {found_last_name_user[0]['nickname']} ({found_last_name_user[0]['id']}, {found_last_name_user[0]['position']})")
-                    users_to_add.append(found_last_name_user[0])
-                    found_flag = True
-                else:
-                    logger.error(f"User {searched} found more than one user:")
-                    for user in found_last_name_user:
-                        logger.error(f" - last name {user['name']['last']}, nickname {user['nickname']} ({user['id']}, {user['position']})")
-                    logger.error("Refine your search parameters.")
-                    double_users_flag = True
-                    break
-
-        if not found_flag:
-            logger.error(f"User {searched} not found in Y360 organization.")
+            if not found_flag:
+                logger.error(f"User {searched} not found in Y360 organization.")
 
     return break_flag, double_users_flag, users_to_add
 
@@ -3917,11 +4154,6 @@ def get_email_signature(settings: "SettingParams"):
     """
     console.clear()
     clear_screen()
-
-
-
-
-    
     
     # Create header
     header_panel = Panel(
