@@ -31,7 +31,7 @@ from rich.status import Status
 from rich import box
 from rich.markdown import Markdown
 
-DEFAULT_360_SCIM_API_URL = "https://{domain_id}.scim-api.passport.yandex.net/"
+DEFAULT_360_SCIM_API_URL = "https://{domain_id}.scim-api.passport.yandex.net"
 DEFAULT_360_API_URL = "https://api360.yandex.net"
 DEFAULT_360_API_URL_V2 = "https://cloud-api.yandex.net/v1/admin/org"
 ITEMS_PER_PAGE = 100
@@ -431,7 +431,7 @@ def change_SCIM_username_manually(settings: "SettingParams"):
     
     old_value, new_value = value.split()
     single_mode(settings, old_value, new_value)
-    console.input("[dim]Press Enter to continue...[/dim]")
+    settings.all_scim_users = []
 
 def single_mode(settings: "SettingParams", old_value, new_value):
     with console.status("[bold green]Loading SCIM users...", spinner="dots"):
@@ -1280,6 +1280,50 @@ def get_all_scim_users_from_api(settings: "SettingParams"):
 
     return users
 
+def get_selected_scim_users_from_api(settings: "SettingParams", user_ids: list[str]):
+    
+    if settings.skip_scim_api_call:
+        logger.info("No SCIM config found. Skip getting selected users of the organisation from SCIM action.")
+        return []
+    if not user_ids:
+        logger.info("No user IDs provided. Skip getting selected users of the organisation from SCIM action.")
+        return []
+    logger.info("Getting selected users of the organisation from SCIM...")
+    users = []
+    headers = {
+        "Authorization": f"Bearer {settings.scim_token}"
+    }
+    url = DEFAULT_360_SCIM_API_URL.format(domain_id=settings.domain_id)
+    try:
+        for user_id in user_ids:
+            retries = 1
+            while True:
+                logger.debug(f"GET url - {url}/v2/Users/{user_id}")         
+                response = requests.get(f"{url}/v2/Users/{user_id}", headers=headers)
+                logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
+                if response.status_code != HTTPStatus.OK.value:
+                    logger.error(f"Error during GET request: {response.status_code}. Error message: {response.text}")
+                    if retries < MAX_RETRIES:
+                        logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
+                        time.sleep(RETRIES_DELAY_SEC * retries)
+                        retries += 1
+                    else:
+                        logger.error("Forcing exit without getting data.")
+                        return []
+                else:
+                    users.append(response.json())
+                    break
+
+    except Exception as e:
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+        return []
+    
+    if settings.ignore_user_domain:
+        for user in users:
+            user['userName'] = user['userName'].split("@")[0]
+
+    return users
+
 def change_nickname_prompt(settings: "SettingParams"):
     """
     Interactive prompt for changing user nicknames.
@@ -1434,32 +1478,21 @@ def change_nickname(settings: "SettingParams", old_value: str, new_value: str):
         logger.error(f"User with nickname {new_value} already exists. User ID - {existing_user[0]['id']}. Clear this nickname and try again.")
         return
     
+    nickname_already_exists = False
     for user in users:
         if new_value in [r.lower() for r in user['aliases']] and user['nickname'].lower() != old_value:
             logger.error(f"Nickname {new_value} already exists as alias in user with nickname {user['nickname']}. User ID - {user['id']}. Clear this alias in this user and try again.")
             return
-        if user['nickname'].lower() != old_value:
-            for contact in user['contacts']:
-                if contact['type'] == 'email' and contact['value'].split('@')[0].lower() == new_value:
-                    logger.error(f"Nickname {new_value} already exists as email contact in user with nickname {user['nickname']}. User ID - {user['id']}. Clear this contact email in this user and try again.")
-                    return
-        else:
-            for contact in user['contacts']:
-                if contact['type'] == 'email' and contact['value'].split('@')[0].lower() == new_value:
-                    if settings.skip_scim_api_call:
-                        logger.info(f"Nickname {new_value} already found as alias in target user. Need to delete alias {new_value} in target user (uid - {user['id']}).")
-                        if settings.skip_scim_api_call:
-                            logger.info("SCIM API is disablled. Trying to delete alias using 360 API.")
-                            remove_alias_by_api360(settings, user['id'], new_value)    
-    
-    if not settings.skip_scim_api_call:
-        if new_value in [r.lower() for r in target_user[0]['aliases']]:
-            remove_alias_in_scim(target_user[0]['id'], new_value)
+        elif new_value in [r.lower() for r in user['aliases']] and user['nickname'].lower() == old_value:
+            logger.error(f"Nickname {new_value} already exists as alias in modified user (nickname - {user['nickname']}, id - {user['id']}). Clear this alias.")
+            nickname_already_exists = True
 
-        for contact in target_user[0]['contacts']:
-            if contact['type'] == 'email' and contact['value'].split('@')[0].lower() == new_value:
-                remove_email_in_scim(target_user[0]['id'], new_value)
-    
+    if nickname_already_exists:
+        if not settings.skip_scim_api_call:
+            remove_alias_in_scim(settings, target_user[0]['id'], new_value)
+            remove_emails_matching_templates_in_scim(settings, [f"{new_value}@*"], users, show_only=False, force_SCIM_call=True)
+        else:
+            remove_alias_by_api360(settings, target_user[0]['id'], new_value)
 
     logger.info(f"Changing nickname of user {old_value} to {new_value}")
     raw_data = {'nickname': new_value}
@@ -1485,7 +1518,7 @@ def change_nickname(settings: "SettingParams", old_value: str, new_value: str):
         return 
     
     if not settings.skip_scim_api_call:
-        remove_alias_in_scim(target_user[0]['id'], old_value)
+        remove_alias_in_scim(settings, target_user[0]['id'], old_value)
 
     logger.info("Reload list of users to reflect changes in nickname.")
     settings.all_users = None
@@ -1521,7 +1554,7 @@ def remove_alias_by_api360(settings: "SettingParams", user_id: str, alias: str):
     except Exception as e:
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
 
-def remove_alias_in_scim(user_id: str, alias: str):
+def remove_alias_in_scim(settings: "SettingParams", user_id: str, alias: str):
     logger.info(f"Check if exist and removing alias {alias} in _SCIM_ user {user_id}")
 
     url = DEFAULT_360_SCIM_API_URL.format(domain_id=settings.domain_id)
@@ -1566,7 +1599,7 @@ def remove_alias_in_scim(user_id: str, alias: str):
     except requests.exceptions.RequestException as e:
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
 
-def remove_email_in_scim(user_id: str, alias: str):
+def remove_email_in_scim(settings: "SettingParams", user_id: str, alias: str):
     logger.info(f"Check if exist and removing email with alias {alias} in _SCIM_ user {user_id} email info.")
     url = DEFAULT_360_SCIM_API_URL.format(domain_id=settings.domain_id) 
     headers = {"Authorization": f"Bearer {settings.scim_token}"}
@@ -1686,17 +1719,21 @@ def remove_unlinked_domains_in_scim_emails_for_all_users(settings: "SettingParam
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
 
 
-def remove_emails_matching_templates_in_scim(settings: "SettingParams", templates: list[str], users: list[str], show_only = False, force_SCIM_call = True):
+def remove_emails_matching_templates_in_scim(settings: "SettingParams", templates: list[str], users: list[str], show_only = False, force_SCIM_call = True, all_users_flag = False):
     logger.info(f"Removing emails matching templates {','.join(templates)} in _SCIM_ users.")
     url = DEFAULT_360_SCIM_API_URL.format(domain_id=settings.domain_id)
     headers = {"Authorization": f"Bearer {settings.scim_token}"}
     try:
-        scim_users = get_all_scim_users(settings, force_SCIM_call)
+        api_users_ids = [user['id'] for user in users]
+        if all_users_flag:
+            scim_users = get_all_scim_users(settings, force_SCIM_call)
+        else:
+            scim_users = get_selected_scim_users_from_api(settings, api_users_ids)
         if not scim_users:
             logger.error("No users found from SCIM calls. Check your settings.")
             return
         found_matching_emails = False
-        api_users_ids = [user['id'] for user in users]
+        
         for user in scim_users:
             if user['id'] not in api_users_ids:
                 continue
@@ -1787,13 +1824,14 @@ def remove_contacts_in_scim_prompt(settings: "SettingParams"):
     ))
     
     break_flag = False
+    all_users_flag = False
 
     while True:
 
         while True:
             users_to_add = []
             double_users_flag = False
-            break_flag, double_users_flag, users_to_add = find_users_prompt(settings)
+            break_flag, double_users_flag, users_to_add, all_users_flag = find_users_prompt(settings)
 
             if break_flag:
                 break
@@ -1849,14 +1887,14 @@ def remove_contacts_in_scim_prompt(settings: "SettingParams"):
 
         console.print("[green]=======================================================[/green]")
         console.print("[bold yellow]Next emails will be deleted:[/bold yellow]")
-        remove_emails_matching_templates_in_scim(settings, target_templates, users_to_add, show_only = True, force_SCIM_call = True)
+        remove_emails_matching_templates_in_scim(settings, target_templates, users_to_add, show_only = True, force_SCIM_call = True, all_users_flag = all_users_flag)
         console.print("[green]=======================================================[/green]")
         console.print("\n")
         if not Confirm.ask(f"[bold yellow]Search and delete emails matching templates {','.join(target_templates)} for {len(users_to_add)} users?[/bold yellow]"):
             console.print("[yellow]Operation cancelled by user.[/yellow]")
             console.print("\n")
         else:
-            remove_emails_matching_templates_in_scim(settings, target_templates, users_to_add, show_only = False, force_SCIM_call = False)
+            remove_emails_matching_templates_in_scim(settings, target_templates, users_to_add, show_only = False, force_SCIM_call = False, all_users_flag = all_users_flag)
             console.print("[green]Emails matching templates deleted.[/green]")
             console.input("[dim]Press Enter to continue...[/dim]")
 
@@ -2831,7 +2869,7 @@ def send_perm_add_users_to_allow_list_prompt(settings: "SettingParams"):
     
     while True:
 
-        break_flag, double_users_flag, users_to_add = find_users_prompt(settings)
+        break_flag, double_users_flag, users_to_add, all_users_flag = find_users_prompt(settings)
         if break_flag:
             break
         
@@ -2855,7 +2893,7 @@ def send_perm_remove_users_from_allow_list(settings: "SettingParams"):
         return
     
     while True:
-        break_flag, double_users_flag, users_to_remove = find_users_prompt(settings)
+        break_flag, double_users_flag, users_to_remove, all_users_flag = find_users_prompt(settings)
         if break_flag:
             break
         
@@ -3252,7 +3290,7 @@ def forward_rules_get_for_user(settings: "SettingParams"):
     logger.info("Get forward rules for users.")
     while True:
         
-        break_flag, double_users_flag, users_to_add = find_users_prompt(settings)
+        break_flag, double_users_flag, users_to_add, all_users_flag = find_users_prompt(settings)
         if break_flag:
             break
         
@@ -3331,7 +3369,7 @@ def forward_rules_clear_for_user(settings: "SettingParams"):
     logger.info("Clear forward and autoreply rules for users.")
     while True:
         
-        break_flag, double_users_flag, users_to_clear = find_users_prompt(settings)
+        break_flag, double_users_flag, users_to_clear, all_users_flag = find_users_prompt(settings)
         if break_flag:
             break
         
@@ -3349,6 +3387,7 @@ def  find_users_prompt(settings: "SettingParams"):
     break_flag = False
     double_users_flag = False
     users_to_add = []
+    all_users_flag = False
     answer = Prompt.ask(
         "[bold yellow]Enter users aliases or uid or last name, separated by comma or space (* - all users)[/bold yellow]",
         default=""
@@ -3362,7 +3401,8 @@ def  find_users_prompt(settings: "SettingParams"):
             break_flag = True
 
         if answer.strip() == "*":
-            return break_flag, double_users_flag, users
+            all_users_flag = True
+            return break_flag, double_users_flag, users, all_users_flag
 
         pattern = r'[;,\s]+'
         search_users = re.split(pattern, answer)
@@ -3410,7 +3450,7 @@ def  find_users_prompt(settings: "SettingParams"):
             if not found_flag:
                 logger.error(f"User {searched} not found in Y360 organization.")
 
-    return break_flag, double_users_flag, users_to_add
+    return break_flag, double_users_flag, users_to_add, all_users_flag
 
 def get_forward_rules_from_api(settings: "SettingParams", user):
     logger.debug(f"Getting forward rule for user {user['id']} ({user['nickname']})...")
@@ -3679,7 +3719,7 @@ def mfa_prompt_settings_for_user(settings: "SettingParams"):
     logger.info("Get 2FA settings for users.")
     while True:
         
-        break_flag, double_users_flag, users_to_add = find_users_prompt(settings)
+        break_flag, double_users_flag, users_to_add, all_users_flag = find_users_prompt(settings)
         if break_flag:
             break
         
@@ -3756,7 +3796,7 @@ def mfa_reset_personal_phone_prompt(settings: "SettingParams"):
     logger.info("Reset 2FA phone for users.")
     while True:
         
-        break_flag, double_users_flag, users_to_add = find_users_prompt(settings)
+        break_flag, double_users_flag, users_to_add, all_users_flag = find_users_prompt(settings)
         if break_flag:
             break
         
@@ -3807,7 +3847,7 @@ def mfa_logout_single_user_prompt(settings: "SettingParams"):
     logger.info("Logout users from Yandex 360 services.")
     while True:
         
-        break_flag, double_users_flag, users_to_add = find_users_prompt(settings)
+        break_flag, double_users_flag, users_to_add, all_users_flag = find_users_prompt(settings)
         if break_flag:
             break
         
