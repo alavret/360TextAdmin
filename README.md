@@ -909,7 +909,7 @@ python 360_text_admin_console.py
 | Название разрешения | Что можно делать |
 |-------------------|------------------|
 | directory:read_users | читать пользователей|
-| directory:read_users | записывать информацию о пользователях|
+| directory:write | записывать информацию о пользователях|
 | directory:read_groups | читать группы |
 | directory:write_groups | записывать информацию о группах |
 |ya360_admin:mail_read_mail_list_permissions|читать список разрешений на отправку в группу|
