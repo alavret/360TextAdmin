@@ -345,6 +345,8 @@ uid;nickname;displayName;forwardingAddresses;keepLocalCopy;isEnabled
 - `EMAIL_SIGNATURE_POSITION` - позиция подписи: `bottom` или `under` (по умолчанию: `bottom`)
 - `DRY_RUN` - режим тестирования (true/false)
 
+Для установки подписей необходимо передать в файле список пользователей. По умолчанию это файл, который определен в .env файле в параметре `EMAIL_SIGNATURE_INPUT_FILE`, который по умолчанию имеет значение `users_signature_input.csv`.
+
 **Формат файла со списком пользователей:**
 ```csv
 # Строки, начинающиеся с #, игнорируются

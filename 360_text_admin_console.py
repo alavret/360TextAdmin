@@ -135,7 +135,7 @@ def get_settings():
         all_groups = [],
         all_groups_get_timestamp = datetime.now(),
         ignore_user_domain = False,
-        email_signature_input_file = os.environ.get("EMAIL_SIGNATURE_INPUT_FILE", "users.csv"),
+        email_signature_input_file = os.environ.get("EMAIL_SIGNATURE_INPUT_FILE", "users_signature_input.csv"),
         email_signature_template_file = os.environ.get("EMAIL_SIGNATURE_TEMPLATE_FILE", "signature_template.html"),
         email_signature_language = os.environ.get("EMAIL_SIGNATURE_LANGUAGE", "ru"),
         email_signature_is_default = os.environ.get("EMAIL_SIGNATURE_IS_DEFAULT", "false").lower() == "true",
