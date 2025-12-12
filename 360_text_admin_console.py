@@ -47,8 +47,30 @@ USERS_PER_PAGE_FROM_API = 1000
 GROUPS_PER_PAGE_FROM_API = 1000
 
 DEPARTMENTS_PER_PAGE_FROM_API = 1000
+DEPS_SEPARATOR = '|'
+ALL_DEPS_REFRESH_IN_MINUTES = 15
 
 EXIT_CODE = 1
+
+# Необходимые права доступа для работы скрипта
+NEEDED_PERMISSIONS = [
+    "directory:read_users",
+    "directory:write_users",
+    "directory:read_departments",
+    "directory:write_departments",
+    "directory:read_groups",
+    "directory:write_groups",
+    "directory:read_organization",
+    "ya360_admin:mail_read_shared_mailbox_inventory",
+    "ya360_admin:mail_read_shared_mailbox_inventory",
+    "ya360_admin:mail_read_mail_list_permissions",
+    "ya360_admin:mail_write_mail_list_permissions",
+    "ya360_security:domain_2fa_write",
+    "ya360_security:domain_sessions_read",
+    "ya360_admin:mail_read_user_settings",
+    "ya360_admin:mail_write_user_settings",
+
+]
 
 # Initialize Rich console
 console = Console()
@@ -91,6 +113,8 @@ class SettingParams:
     all_users_get_timestamp : datetime
     all_scim_users : list
     all_scim_users_get_timestamp : datetime
+    all_deps : list
+    all_deps_get_timestamp : datetime
     forward_rules_output_file : str
     shared_mailboxes : list
     shared_mailboxes_get_timestamp : datetime
@@ -130,6 +154,8 @@ def get_settings():
         all_users_get_timestamp = datetime.now(),
         all_scim_users = [],
         all_scim_users_get_timestamp = datetime.now(),
+        all_deps = [],
+        all_deps_get_timestamp = datetime.now(),
         shared_mailboxes = [],
         shared_mailboxes_get_timestamp = datetime.now(),
         all_groups = [],
@@ -184,9 +210,15 @@ def get_settings():
             scim_token_bad = True
 
     if not (oauth_token_bad or exit_flag):
-        if not check_oauth_token(settings.oauth_token, settings.org_id):
-            logger.error("OAUTH_TOKEN_ARG is not valid")
+        hard_error, result_ok = check_token_permissions(settings.oauth_token, settings.org_id, NEEDED_PERMISSIONS)
+        if hard_error:            
+            logger.debug("OAUTH_TOKEN не является действительным или не имеет необходимых прав доступа")
+            console.print("[bold red]❌ OAUTH_TOKEN не является действительным или не имеет необходимых прав доступа.[/bold red]")
+            console.input("[dim]Press Enter to continue...[/dim]")
             oauth_token_bad = True
+        elif not result_ok:
+            console.print("[bold yellow]⚠️ ВНИМАНИЕ: Функциональность скрипта может быть ограничена. Возможны ошибки при работе с API.[/bold yellow]")
+            console.input("[dim]Press Enter to continue...[/dim]")
 
     if scim_token_bad:
         settings.skip_scim_api_call = True
@@ -229,6 +261,140 @@ def check_oauth_token(oauth_token, org_id):
     if response.status_code == HTTPStatus.OK:
         return True
     return False
+
+def check_token_permissions(token: str, org_id: int, needed_permissions: list) -> bool:
+    """
+    Проверяет права доступа для заданного токена.
+    
+    Args:
+        token: OAuth токен для проверки
+        org_id: ID организации
+        needed_permissions: Список необходимых прав доступа
+        
+    Returns:
+        bool: True если токен невалидный, False в противном случае, продолжение работы невозможно
+        bool: True если все права присутствуют и org_id совпадает, False в противном случае, продолжение работы возможно
+    """
+    url = 'https://api360.yandex.net/whoami'
+    headers = {
+        'Authorization': f'OAuth {token}'
+    }
+    hard_error = False
+    try:
+        response = requests.get(url, headers=headers)
+        
+        # Проверка валидности токена
+        if response.status_code != HTTPStatus.OK:
+            logger.debug(f"Невалидный токен. Статус код: {response.status_code}. Ответ: {response.text}")
+            error_body = response.text.strip() or "Нет дополнительной информации"
+            console.print(Panel(
+                "\n".join([
+                    "[bold red]❌ Невалидный OAuth токен[/bold red]",
+                    f"[yellow]Статус код:[/yellow] {response.status_code}",
+                    f"[dim]{error_body}[/dim]"
+                ]),
+                title="[red]Проверка токена[/red]",
+                border_style="red"
+            ))
+            return True, False
+        
+        data = response.json()
+        
+        # Извлечение scopes и orgIds из ответа
+        token_scopes = data.get('scopes', [])
+        token_org_ids = data.get('orgIds', [])
+        login = data.get('login', 'unknown')
+        
+        logger.info(f"Проверка прав доступа для токена пользователя: {login}")
+        logger.debug(f"Доступные права: {token_scopes}")
+        logger.debug(f"Доступные организации: {token_org_ids}")
+        orgs_display = ", ".join(str(org) for org in token_org_ids) if token_org_ids else "—"
+        console.print(Panel(
+            "\n".join([
+                f"[bold cyan]🔍 Проверка прав доступа для: [white]{login}[/white][/bold cyan]",
+                f"[green]Доступные организации:[/green] {orgs_display}"
+            ]),
+            title="[cyan]Информация о токене[/cyan]",
+            border_style="cyan"
+        ))
+        
+        # Проверка наличия org_id в списке доступных организаций
+        if str(org_id) not in [str(org) for org in token_org_ids]:
+            logger.debug(f"ОШИБКА: Токен не имеет доступа к организации с ID {org_id}. Доступные orgIds: {token_org_ids}")
+            console.print(Panel(
+                "\n".join([
+                    "[bold red]⛔ Токен не имеет доступа к указанной организации[/bold red]",
+                    f"[yellow]Запрошенная orgId:[/yellow] {org_id}",
+                    f"[green]Доступные orgIds:[/green] {orgs_display}"
+                ]),
+                title="[red]Недостаточно прав[/red]",
+                border_style="red"
+            ))
+            return True, False
+
+        # Проверка наличия всех необходимых прав
+        missing_permissions = []
+        for permission in needed_permissions:
+            if permission not in token_scopes:
+                missing_permissions.append(permission)
+        
+        if missing_permissions:
+            logger.debug(f"ОШИБКА: У токена отсутствуют необходимые права доступа: {missing_permissions}")
+            permissions_table = Table(
+                show_header=False,
+                box=box.SIMPLE_HEAVY,
+                padding=(0, 1)
+            )
+            permissions_table.add_column("Недостающие права", style="yellow")
+            for perm in missing_permissions:
+                permissions_table.add_row(f"[red]•[/red] {perm}")
+
+            console.print(Panel(
+                Align.left(permissions_table),
+                title="[yellow]⚠️ Недостающие права доступа[/yellow]",
+                border_style="yellow"
+            ))
+            return False, False
+
+        logger.debug("✓ Все необходимые права доступа присутствуют")
+        logger.debug(f"✓ Доступ к организации {org_id} подтвержден")
+        console.print(Panel(
+            "\n".join([
+                "[bold green]✅ Все необходимые права доступа присутствуют[/bold green]",
+                f"[green]Организация подтверждена:[/green] {org_id}"
+            ]),
+            title="[green]Токен проверен[/green]",
+            border_style="green"
+        ))
+        return False, True
+        
+    except requests.exceptions.RequestException as e:
+        logger.debug(f"Ошибка при выполнении запроса к API: {e}")
+        console.print(Panel(
+            f"[bold red]Ошибка при выполнении запроса к API[/bold red]\n[dim]{e}[/dim]",
+            title="[red]Ошибка сети[/red]",
+            border_style="red"
+        ))
+        return True, False
+    except json.JSONDecodeError as e:
+        logger.debug(f"Ошибка при парсинге ответа от API: {e}")
+        console.print(Panel(
+            f"[bold red]Ошибка при парсинге ответа от API[/bold red]\n[dim]{e}[/dim]",
+            title="[red]Ошибка данных[/red]",
+            border_style="red"
+        ))
+        return True, False
+    except Exception as e:
+        logger.debug(f"Неожиданная ошибка при проверке прав доступа: {type(e).__name__}: {e}")
+        console.print(Panel(
+            "\n".join([
+                "[bold red]Неожиданная ошибка при проверке прав доступа[/bold red]",
+                f"[dim]{type(e).__name__}: {e}[/dim]"
+            ]),
+            title="[red]Критическая ошибка[/red]",
+            border_style="red"
+        ))
+        return True, False
 
 def validate_domain_name(domain_name: str) -> bool:
     """
@@ -3584,7 +3750,10 @@ def mfa_download_settings(settings):
     if not users:
         logger.info("No users found in Y360 organization.")
         return
-
+    all_deps = generate_deps_hierarchy_from_api(settings)
+    if not all_deps:
+        logger.info("No departments found in Y360 organization.")
+        
     mfa = []
     count = 0
     logger.info(f"Total users count - {len(users)}.")
@@ -3597,6 +3766,13 @@ def mfa_download_settings(settings):
                 user_mfa['displayName'] = user['name']['last'] + " " + user['name']['first'] + " " + user['name']['middle']
                 user_mfa['isEnabled'] = user['isEnabled']
                 user_mfa['isAdmin'] = user['isAdmin']
+                temp_dep = next((dep for dep in all_deps if dep['id'] == user['departmentId']), None)
+                if temp_dep:
+                    user_mfa['department'] = temp_dep['path']
+                else:
+                    user_mfa['department'] = ""
+                user_mfa['email'] = user['email']
+
                 count += 1
                 if count % 10 == 0:
                     logger.info(f"Processed {count} users (total users count - {len(users)}).")
@@ -3626,9 +3802,9 @@ def mfa_download_settings(settings):
                 mfa.append(user_mfa)
 
     with open(settings.users_2fa_output_file, "w", encoding="utf-8") as f:
-        f.write("uid;nickname;displayName;isEnabled;isAdmin;domain2FAEnabled;hasSecurityPhone;personal2FAEnabled;global2FAEnabled;global2FADuration;global2FAPolicy\n")
+        f.write("uid;nickname;displayName;isEnabled;isAdmin;domain2FAEnabled;hasSecurityPhone;personal2FAEnabled;global2FAEnabled;global2FADuration;global2FAPolicy;email;department\n")
         for user in mfa:
-            f.write(f"{user['id']};{user['nickname']};{user['displayName']};{user['isEnabled']};{user['isAdmin']};{user['domain2FAEnabled']};{user['hasSecurityPhone']};{user['personal2FAEnabled']};{user['global2FAEnabled']};{user['global2FADuration']};{user['global2FAPolicy']}\n")
+            f.write(f"{user['id']};{user['nickname']};{user['displayName']};{user['isEnabled']};{user['isAdmin']};{user['domain2FAEnabled']};{user['hasSecurityPhone']};{user['personal2FAEnabled']};{user['global2FAEnabled']};{user['global2FADuration']};{user['global2FAPolicy']};{user['email']};{user['department']}\n")
         logger.info(f"{len(users)} users downloaded to file {settings.users_2fa_output_file}")
     console.input("[dim]Press Enter to continue...[/dim]")
 
@@ -4606,7 +4782,18 @@ def set_email_signature(settings: "SettingParams"):
     console.print("\n[bold cyan]Press Enter to continue...[/bold cyan]")
     input()
 
-def get_all_api360_departments(settings: "SettingParams"):
+def get_all_api360_departments(settings: "SettingParams", force = False, show_messages = False):
+    if not force:
+        if show_messages:
+            logger.info("Получение всех подразделений организации из кэша...")
+        else:
+            logger.debug("Получение всех подразделений организации из кэша...")
+    if not settings.all_deps or force or (datetime.now() - settings.all_deps_get_timestamp).total_seconds() > ALL_DEPS_REFRESH_IN_MINUTES * 60:
+        settings.all_deps = get_all_api360_departments_from_api(settings)
+        settings.all_deps_get_timestamp = datetime.now()
+    return settings.all_deps
+
+def get_all_api360_departments_from_api(settings: "SettingParams"):
     logger.info("Получение всех подразделений организации из API...")
     url = f'{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/departments'
     headers = {"Authorization": f"OAuth {settings.oauth_token}"}
@@ -4654,6 +4841,24 @@ def get_all_api360_departments(settings: "SettingParams"):
     
     return departments
 
+def generate_deps_hierarchy_from_api(settings: "SettingParams", force = False, show_messages = False):
+    all_deps_from_api = get_all_api360_departments(settings, force, show_messages)
+    if len(all_deps_from_api) == 1:
+        #print('There are no departments in organozation! Exit.')
+        return []
+    all_deps = []
+    for item in all_deps_from_api:        
+        path = item['name'].strip()
+        prevId = item['parentId']
+        if prevId > 0:
+            while not prevId == 1:
+                d = next(i for i in all_deps_from_api if i['id'] == prevId)
+                path = f'{d["name"].strip()}{DEPS_SEPARATOR}{path}'
+                prevId = d['parentId']
+            element = {'id':item['id'], 'parentId':item['parentId'], 'path':path}
+            all_deps.append(element)
+    return all_deps
+
 if __name__ == "__main__":
     # Display startup banner
     console.print(Panel(
@@ -4678,8 +4883,9 @@ if __name__ == "__main__":
     logger.debug("---------------------------------------------------------------------------.")
     logger.debug("Запуск скрипта.")
 
-    with console.status("[bold green]Initializing settings...", spinner="dots"):
-        settings = get_settings()
+    #with console.status("[bold green]Initializing settings...", spinner="dots"):
+    
+    settings = get_settings()
     
     if settings is None:
         console.print("[bold red]❌ Check config setting in .env file and try again.[/bold red]")

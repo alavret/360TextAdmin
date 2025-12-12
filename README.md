@@ -750,9 +750,9 @@ DRY_RUN=false
 #### Структура файла
 
 ```csv
-uid;nickname;displayName;isEnabled;isAdmin;domain2FAEnabled;hasSecurityPhone;personal2FAEnabled;global2FAEnabled;global2FADuration;global2FAPolicy
-1130000069123456;ivan;Иванов Иван;true;false;true;false;false;true;86400;per_user
-1130000069123457;petr;Петров Петр;true;false;true;true;true;true;86400;per_user
+uid;nickname;displayName;isEnabled;isAdmin;domain2FAEnabled;hasSecurityPhone;personal2FAEnabled;global2FAEnabled;global2FADuration;global2FAPolicy;email;department
+1130000069123456;ivan;Иванов Иван;true;false;true;false;false;true;86400;per_user;ivan@company.com;Продажи/Москва
+1130000069123457;petr;Петров Петр;true;false;true;true;true;true;86400;per_user;petr@company.com;ИТ/Поддержка
 ```
 
 #### Описание полей
@@ -770,27 +770,29 @@ uid;nickname;displayName;isEnabled;isAdmin;domain2FAEnabled;hasSecurityPhone;per
 | `global2FAEnabled` | Boolean | Включена ли глобальная 2FA ([Новая модель 2FA (https://yandex.ru/dev/api360/doc/ru/ref/Domain2FAV2Service/)]) | `true` - включена, `false` - отключена |
 | `global2FADuration` | Integer | Длительность сессии при включенной 2FA (в секундах) в новой модели 2FA | Число (например: `86400` = 24 часа) |
 | `global2FAPolicy` | String | Политика применения 2FA в новой модели | `per_domain` - для всех, `per_user` - по по пользователям |
+| `email` | String | Основной email пользователя | Строка (например: `ivan@company.com`) |
+| `department` | String | Путь до подразделения пользователя | `Департамент|Отдел` (пусто, если отдел не найден) |
 
 #### Примеры значений
 
 **Активный пользователь с полной настройкой 2FA:**
 ```csv
-1130000069123456;ivan;Иванов Иван;true;false;true;true;true;true;86400;per_domain
+1130000069123456;ivan;Иванов Иван;true;false;true;true;true;true;86400;per_domain;ivan@company.com;Продажи|Москва
 ```
 
 **Заблокированный пользователь:**
 ```csv
-1130000069123457;petr;Петров Петр;false;false;true;false;false;true;86400;per_domain
+1130000069123457;petr;Петров Петр;false;false;true;false;false;true;86400;per_domain;petr@company.com;ИТ|Поддержка
 ```
 
 **Администратор с минимальной 2FA:**
 ```csv
-1130000069123458;admin;Администратор;true;true;true;false;false;true;3600;per_domain
+1130000069123458;admin;Администратор;true;true;true;false;false;true;3600;per_domain;admin@company.com;Администрирование
 ```
 
 **Пользователь без настроенного телефона безопасности:**
 ```csv
-1130000069123459;user;Пользователь;true;false;true;false;false;true;86400;per_user
+1130000069123459;user;Пользователь;true;false;true;false;false;true;86400;per_user;user@company.com;Бухгалтерия|Регион
 ```
 
 #### Интерпретация комбинаций полей
@@ -948,6 +950,11 @@ python 360_text_admin_console.py
 3. Запишите полученные на предыдущем шаге OAuth токен и Org ID в соответствующие переменные в файле `.env` в том же каталоге, что и сами скрипты.
 
 Подробные инструкции по получению токенов см. в [документации Yandex 360](https://yandex.ru/dev/api360/doc/ru/).
+
+### Автоматическая проверка токенов при запуске
+
+- **SCIM токен:** валидируется запросом к `/scim/v2/Users`; при ошибке SCIM-функции пропускаются, остальные операции продолжают работу.
+- **OAuth токен:** проверяется — валидность, принадлежность к `ORG_ID_ARG` и наличие необходимых scopes из таблицы разрешений. При критической ошибке выполнение прекращается, при нехватке прав выводится предупреждение и работа продолжается с ограничениями.
 
 ## Логирование
 
