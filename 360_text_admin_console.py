@@ -1656,9 +1656,11 @@ def change_nickname(settings: "SettingParams", old_value: str, new_value: str):
     if nickname_already_exists:
         if not settings.skip_scim_api_call:
             remove_alias_in_scim(settings, target_user[0]['id'], new_value)
-            remove_emails_matching_templates_in_scim(settings, [f"{new_value}@*"], users, show_only=False, force_SCIM_call=True)
         else:
             remove_alias_by_api360(settings, target_user[0]['id'], new_value)
+
+    if not settings.skip_scim_api_call:
+        remove_emails_matching_templates_in_scim(settings, [f"{new_value}@*"], users, show_only=False, force_SCIM_call=True)
 
     logger.info(f"Changing nickname of user {old_value} to {new_value}")
     raw_data = {'nickname': new_value}
@@ -1732,36 +1734,36 @@ def remove_alias_in_scim(settings: "SettingParams", user_id: str, alias: str):
         if response.ok:
             user = response.json()
             if user['urn:ietf:params:scim:schemas:extension:yandex360:2.0:User']['aliases']:
-                compiled_alias = {}
-                compiled_alias['login'] = alias
-                if compiled_alias in user['urn:ietf:params:scim:schemas:extension:yandex360:2.0:User']['aliases']:
-                    user['urn:ietf:params:scim:schemas:extension:yandex360:2.0:User']['aliases'].remove(compiled_alias)
+                for existing_alias in user['urn:ietf:params:scim:schemas:extension:yandex360:2.0:User']['aliases']:
+                    if existing_alias['login'].lower() == alias.lower():
+                        user['urn:ietf:params:scim:schemas:extension:yandex360:2.0:User']['aliases'].remove(existing_alias)
+                        # не делаю break, чтобы удалить все алиасы, т.е. есть вероятность, что в user['urn:ietf:params:scim:schemas:extension:yandex360:2.0:User']['aliases'] будет несколько алиасов с одним именем, но с разным регистром
 
-                    data = json.loads("""   { "Operations":    
-                                                [
-                                                    {
-                                                    "value": _data_,
-                                                    "op": "replace",
-                                                    "path": "urn:ietf:params:scim:schemas:extension:yandex360:2.0:User.aliases"
-                                                    }
-                                                ],
-                                                "schemas": [
-                                                    "urn:ietf:params:scim:api:messages:2.0:PatchOp"
-                                                ]
-                                            }""".replace("_data_", json.dumps(user['urn:ietf:params:scim:schemas:extension:yandex360:2.0:User']['aliases'])))
-                    
-                    logger.debug(f"PATCH URL: {url}/v2/Users/{user_id}")
-                    logger.debug(f"PATCH DATA: {data}")
-                    if settings.dry_run:
-                        logger.info(f"Dry run: Would remove alias {alias} in _SCIM_ user {user_id}")
-                        return
-                    response = requests.patch(f"{url}/v2/Users/{user_id}", headers=headers, data=json.dumps(data))
-                    logger.debug(f"X-Request-Id: {response.headers.get('X-Request-Id','')}")
-                    if response.ok:
-                        logger.info(f"Alias {alias} removed in user {user_id}")
-                        time.sleep(SLEEP_TIME_BETWEEN_API_CALLS)
-                    else:
-                        logger.error(f"Error ({response.status_code}) removing alias {alias} in user {user_id}: {response.text}")
+                data = json.loads("""   { "Operations":    
+                                            [
+                                                {
+                                                "value": _data_,
+                                                "op": "replace",
+                                                "path": "urn:ietf:params:scim:schemas:extension:yandex360:2.0:User.aliases"
+                                                }
+                                            ],
+                                            "schemas": [
+                                                "urn:ietf:params:scim:api:messages:2.0:PatchOp"
+                                            ]
+                                        }""".replace("_data_", json.dumps(user['urn:ietf:params:scim:schemas:extension:yandex360:2.0:User']['aliases'])))
+                
+                logger.debug(f"PATCH URL: {url}/v2/Users/{user_id}")
+                logger.debug(f"PATCH DATA: {data}")
+                if settings.dry_run:
+                    logger.info(f"Dry run: Would remove alias {alias} in _SCIM_ user {user_id}")
+                    return
+                response = requests.patch(f"{url}/v2/Users/{user_id}", headers=headers, data=json.dumps(data))
+                logger.debug(f"X-Request-Id: {response.headers.get('X-Request-Id','')}")
+                if response.ok:
+                    logger.info(f"Alias {alias} removed in user {user_id}")
+                    time.sleep(SLEEP_TIME_BETWEEN_API_CALLS)
+                else:
+                    logger.error(f"Error ({response.status_code}) removing alias {alias} in user {user_id}: {response.text}")
     except requests.exceptions.RequestException as e:
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
 
@@ -1779,11 +1781,11 @@ def remove_email_in_scim(settings: "SettingParams", user_id: str, alias: str):
             found_alias = False
             for email in user['emails']:
                 temp = {}
-                if email['value'].split('@')[0] != alias:
+                if email['value'].split('@')[0].lower() != alias.lower():
                     temp['primary'] = email['primary']
                     if len(email.get("type",'')) > 0:
                         temp['type'] = email['type']
-                    temp['value'] = email['value']
+                    temp['value'] = email['value'].lower()
                     new_emails.append(temp)
                 else:
                     found_alias = True
@@ -1904,9 +1906,10 @@ def remove_emails_matching_templates_in_scim(settings: "SettingParams", template
             if user['id'] not in api_users_ids:
                 continue
             new_emails= []
-            temp = {}
+            seen_emails = set()
             emails_to_remove = []
             for email in user['emails']:
+                temp = {}
                 email_matches_template = False
                 for template in templates:
                     if match_email_with_template(template, email['value']):
@@ -1914,11 +1917,12 @@ def remove_emails_matching_templates_in_scim(settings: "SettingParams", template
                         emails_to_remove.append(email['value'])
                         break
 
-                if not email_matches_template:
+                if not email_matches_template and email['value'] not in seen_emails:
                     temp['primary'] = email['primary']
                     if len(email.get("type",'')) > 0:
                         temp['type'] = email['type']
                     temp['value'] = email['value']
+                    seen_emails.add(email['value'])
                     new_emails.append(temp)
                 else:
                     found_matching_emails = True
